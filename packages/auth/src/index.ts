@@ -4,3 +4,4 @@
  */
 export * from "./session";
 export * from "./keys";
+export * from "./resolver";
