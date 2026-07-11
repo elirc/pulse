@@ -1,11 +1,16 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import { PrismaKeyStore } from "@pulse/db";
 import { CachedKeyResolver, originAllowed } from "@pulse/auth";
 import { EventInputSchema, eventTime } from "@pulse/shared";
 import { PrismaEventSink, type EventSink } from "./eventsink";
 import { env } from "./env";
+
+// The SDK batches events and POSTs a JSON array. Accept one event or a bounded batch. Extra fields the SDK
+// sends (e.g. the client-minted `uuid`) are stripped by the schema for now; S04 adds uuid + dedupe.
+const MAX_BATCH = 100;
+const BatchSchema = z.array(EventInputSchema).min(1).max(MAX_BATCH);
 
 /**
  * The ingest server (S02) — a SEPARATE deployable from the app API (ADR-0001). The hot path has different
@@ -70,16 +75,18 @@ export function buildIngestServer(opts: IngestServerOptions = {}): FastifyInstan
       return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Origin not allowed for this key" } });
     }
 
-    const input = EventInputSchema.parse(req.body);
-    await sink.append({
-      projectId: resolved.projectId,
-      distinctId: input.distinctId,
-      name: input.name,
-      props: input.props,
-      ts: eventTime(input.ts), // client clock trusted in S02 (a flaw revisited S04/S13)
-    });
+    const inputs = Array.isArray(req.body) ? BatchSchema.parse(req.body) : [EventInputSchema.parse(req.body)];
+    for (const input of inputs) {
+      await sink.append({
+        projectId: resolved.projectId,
+        distinctId: input.distinctId,
+        name: input.name,
+        props: input.props,
+        ts: eventTime(input.ts), // client clock trusted in S02 (a flaw revisited S04/S13)
+      });
+    }
     // 200 with a tiny body — the SDK is fire-and-forget.
-    return reply.code(200).send({ ok: true });
+    return reply.code(200).send({ ok: true, accepted: inputs.length });
   });
 
   return app;

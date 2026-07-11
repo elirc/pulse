@@ -25,4 +25,12 @@ export default tseslint.config(
       "@typescript-eslint/no-explicit-any": "warn",
     },
   },
+  {
+    // Node build scripts (.mjs): give them the Node globals so no-undef is satisfied. (TS files don't trip
+    // no-undef because typescript-eslint handles it; plain .mjs scripts are checked by the core rule.)
+    files: ["**/scripts/**/*.mjs"],
+    languageOptions: {
+      globals: { console: "readonly", process: "readonly" },
+    },
+  },
 );
