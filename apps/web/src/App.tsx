@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { apiGet } from "./lib/api";
+import { Setup } from "./Setup";
 
 interface DailyCount {
   day: string;
   count: number;
 }
+
+type View = "insights" | "setup";
 
 /**
  * The analyst shell (S01). One insight — a daily-count line chart over the event firehose — rendered from
@@ -12,6 +15,7 @@ interface DailyCount {
  * Trends, funnels, retention, and dashboards build out from here (S05+). A tiny inline SVG line, no chart lib.
  */
 export function App(): JSX.Element {
+  const [view, setView] = useState<View>("insights");
   const [data, setData] = useState<DailyCount[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
@@ -20,6 +24,23 @@ export function App(): JSX.Element {
       .then(setData)
       .catch((e: unknown) => setErr(String(e)));
   }, []);
+
+  const tab = (v: View, label: string): JSX.Element => (
+    <button
+      onClick={() => setView(v)}
+      style={{
+        background: "none",
+        border: "none",
+        borderBottom: view === v ? "2px solid #f2545b" : "2px solid transparent",
+        color: view === v ? "#f2545b" : "#8b93a1",
+        cursor: "pointer",
+        fontSize: 14,
+        padding: "6px 4px",
+      }}
+    >
+      {label}
+    </button>
+  );
 
   const max = Math.max(1, ...data.map((d) => d.count));
   const W = 640;
@@ -32,7 +53,14 @@ export function App(): JSX.Element {
 
   return (
     <main style={{ maxWidth: 720, margin: "40px auto", padding: "0 16px", fontFamily: "system-ui, sans-serif", color: "#e6edf3" }}>
-      <h1 style={{ color: "#f2545b" }}>Pulse · Events per day</h1>
+      <h1 style={{ color: "#f2545b" }}>Pulse</h1>
+      <nav style={{ display: "flex", gap: 16, borderBottom: "1px solid #232a32", marginBottom: 24 }}>
+        {tab("insights", "Events per day")}
+        {tab("setup", "Setup")}
+      </nav>
+      {view === "setup" && <Setup />}
+      {view === "insights" && (
+        <>
       {err && <p style={{ color: "salmon" }}>Couldn’t reach the API ({err}). Is it running on :3001?</p>}
       {data.length === 0 && !err && <p style={{ color: "#8b93a1" }}>No events yet — point the SDK (or the loadgen) at the ingest server.</p>}
       {data.length > 0 && (
@@ -48,6 +76,8 @@ export function App(): JSX.Element {
         Walking skeleton: SDK → ingest (a separate deployable) → a naive Postgres events table → this chart. The
         events store stays on Postgres <em>on purpose</em> until S07 measures it across the ADR-0002 exit criteria.
       </p>
+        </>
+      )}
     </main>
   );
 }

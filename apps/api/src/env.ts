@@ -5,6 +5,8 @@ const EnvSchema = z.object({
   API_PORT: z.coerce.number().default(3001),
   WEB_URL: z.string().url().default("http://localhost:5173"),
   DATABASE_URL: z.string().url().optional(),
+  // Session signing secret. A default keeps dev/CI booting; production must override (see ADR-0003).
+  SESSION_SECRET: z.string().min(1).default("dev-insecure-session-secret-change-me"),
 });
 
 export const env = EnvSchema.parse(process.env);
