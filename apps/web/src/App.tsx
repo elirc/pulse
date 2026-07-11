@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { apiGet } from "./lib/api";
 import { Setup } from "./Setup";
+import { Docs } from "./Docs";
 
 interface DailyCount {
   day: string;
   count: number;
 }
 
-type View = "insights" | "setup";
+type View = "insights" | "setup" | "docs";
 
 /**
  * The analyst shell (S01). One insight — a daily-count line chart over the event firehose — rendered from
@@ -57,7 +58,9 @@ export function App(): JSX.Element {
       <nav style={{ display: "flex", gap: 16, borderBottom: "1px solid #232a32", marginBottom: 24 }}>
         {tab("insights", "Events per day")}
         {tab("setup", "Setup")}
+        {tab("docs", "SDK Docs")}
       </nav>
+      {view === "docs" && <Docs />}
       {view === "setup" && <Setup />}
       {view === "insights" && (
         <>
