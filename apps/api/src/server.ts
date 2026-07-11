@@ -34,6 +34,12 @@ const TrendBody = z.object({
   spec: TrendSpecSchema,
 });
 
+const SaveInsightBody = z.object({
+  projectId: z.string().min(1).default("demo-project"),
+  name: z.string().min(1).max(200),
+  definition: TrendSpecSchema,
+});
+
 /** One flat row of a compiled trend query. */
 interface TrendRow {
   bucket: string;
@@ -154,6 +160,26 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     const flat: FlatRow[] = rows.map((r) => ({ bucket: r.bucket, label: r.label ?? null, value: Number(r.value) }));
     // Breakdowns fold the long tail into "Other" so a high-cardinality property can't return thousands of series.
     return body.spec.breakdown ? foldTopNRows(flat, body.spec.topN) : flat;
+  });
+
+  /** Save an insight — the query DEFINITION, versioned, not its results. */
+  app.post<{ Body: unknown }>("/insights", async (req, reply) => {
+    const body = SaveInsightBody.parse(req.body);
+    const row = await prisma.insight.create({
+      data: { projectId: body.projectId, name: body.name, definition: body.definition as object },
+      select: { id: true },
+    });
+    return reply.code(201).send({ id: row.id });
+  });
+
+  /** List saved insights for a project. */
+  app.get<{ Querystring: { projectId?: string } }>("/insights", async (req) => {
+    const projectId = req.query.projectId ?? "demo-project";
+    return prisma.insight.findMany({
+      where: { projectId },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true, name: true, defVersion: true, definition: true, updatedAt: true },
+    });
   });
 
   /**

@@ -41,3 +41,23 @@ describe("key management auth (S02)", () => {
     expect(res.statusCode).toBe(401);
   });
 });
+
+describe("saved insights (S05)", () => {
+  it("rejects saving an insight with an invalid spec (400) before any DB work", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/insights",
+      payload: { name: "bad", definition: { interval: "fortnight" } }, // not an allowlisted interval
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("rejects a trend query with an unknown metric (400)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/insights/trend",
+      payload: { spec: { metric: "median" } },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
