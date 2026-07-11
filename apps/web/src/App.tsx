@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { apiGet } from "./lib/api";
 import { Setup } from "./Setup";
 import { Docs } from "./Docs";
+import { Insights } from "./Insights";
 
 interface DailyCount {
   day: string;
   count: number;
 }
 
-type View = "insights" | "setup" | "docs";
+type View = "insights" | "trends" | "setup" | "docs";
 
 /**
  * The analyst shell (S01). One insight — a daily-count line chart over the event firehose — rendered from
@@ -57,9 +58,11 @@ export function App(): JSX.Element {
       <h1 style={{ color: "#f2545b" }}>Pulse</h1>
       <nav style={{ display: "flex", gap: 16, borderBottom: "1px solid #232a32", marginBottom: 24 }}>
         {tab("insights", "Events per day")}
+        {tab("trends", "Insights")}
         {tab("setup", "Setup")}
         {tab("docs", "SDK Docs")}
       </nav>
+      {view === "trends" && <Insights />}
       {view === "docs" && <Docs />}
       {view === "setup" && <Setup />}
       {view === "insights" && (
