@@ -14,9 +14,80 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ── Tenancy & machine auth (S02) ────────────────────────────────────────────────
+// An Org owns Projects; a Project owns ApiKeys and (logically) events. Org/user/session auth is a
+// fast-forward from prior courses; the NEW material is machine auth — two key TYPES with different
+// audiences (see ApiKey). Metadata lives in Postgres and stays here even after S07 moves events to
+// ClickHouse, which is exactly why Event carries a bare projectId String and NOT a foreign key to
+// Project: you cannot enforce a cross-store FK, and pretending you can is a lie the migration would
+// expose. The boundary is drawn now, on purpose.
+
+model Org {
+  id        String       @id @default(cuid())
+  name      String
+  createdAt DateTime     @default(now())
+  projects  Project[]
+  members   Membership[]
+}
+
+model User {
+  id          String       @id @default(cuid())
+  email       String       @unique
+  createdAt   DateTime     @default(now())
+  memberships Membership[]
+}
+
+model Membership {
+  id     String @id @default(cuid())
+  orgId  String
+  userId String
+  role   String @default("member") // owner | admin | member
+  org    Org    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  createdAt DateTime @default(now())
+  org       Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  apiKeys   ApiKey[]
+
+  @@index([orgId])
+}
+
+// A credential's capability follows its audience. A WRITE key ships in public page source to strangers,
+// so it may only APPEND events; a SECRET key never leaves a server, so it may READ. The type is readable
+// from the plaintext prefix (pw_live_… / ps_live_…), stored so support can identify a key without ever
+// seeing it. The plaintext is shown ONCE at issuance and only its sha256 `hash` is stored — if you can
+// show a key twice, you stored it wrong. (Rotation + per-key rate limits are deferred to S13.)
+enum ApiKeyType {
+  WRITE
+  SECRET
+}
+
+model ApiKey {
+  id         String     @id @default(cuid())
+  projectId  String
+  type       ApiKeyType
+  hash       String     @unique // sha256(plaintext); the plaintext is never stored
+  prefix     String // e.g. "pw_live_ab12" — identifiable but not secret (support/debug)
+  label      String     @default("")
+  lastUsedAt DateTime? // written by SAMPLED update (~1%), never on every event — see resolver
+  revokedAt  DateTime?
+  createdAt  DateTime   @default(now())
+  project    Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
 // One row per tracked action. `props` is a schemaless JSONB bag (the event's shape is the SDK caller's, not
 // ours). `ts` is EVENT time (client clock — trusted in S1, a flaw revisited in S04/S13); `ingestedAt` is
-// SERVER time. In S01 the projectId is a fixed demo value; real projects + write keys arrive in S02.
+// SERVER time. `projectId` is now resolved from a write key (S02) but stays a bare String with NO foreign
+// key to Project on purpose: events migrate to ClickHouse in S07, and a cross-store FK cannot be enforced.
 model Event {
   id         String   @id @default(cuid())
   projectId  String   @default("demo-project")
