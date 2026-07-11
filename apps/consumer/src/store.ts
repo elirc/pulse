@@ -33,19 +33,30 @@ export class PrismaEventStore implements EventStore {
         ts: new Date(e.ts),
         ingestedAt: new Date(e.ingestedAt),
       })),
+      // ON CONFLICT DO NOTHING on the unique uuid — a redelivered event inserts nothing. This is the "apply"
+      // half of "at-least-once delivery + idempotent apply = effective exactly-once". count = rows actually
+      // inserted, so (batch length − count) is exactly how many duplicates delivery handed us this round.
+      skipDuplicates: true,
     });
     return result.count;
   }
 }
 
-/** In-memory store for tests — keeps every inserted event, and records each batch's size so a test can prove
- *  events really are inserted N-per-write rather than one at a time. */
+/** In-memory store for tests — mirrors the unique-uuid constraint (dedupes on uuid) and records each batch's
+ *  attempted size so a test can prove both multi-row batching and idempotent apply. */
 export class InMemoryEventStore implements EventStore {
   public readonly events: QueuedEvent[] = [];
   public readonly batches: number[] = [];
+  private readonly seen = new Set<string>();
   insertBatch(events: QueuedEvent[]): Promise<number> {
     this.batches.push(events.length);
-    this.events.push(...events);
-    return Promise.resolve(events.length);
+    let inserted = 0;
+    for (const e of events) {
+      if (this.seen.has(e.uuid)) continue; // ON CONFLICT DO NOTHING (unique uuid)
+      this.seen.add(e.uuid);
+      this.events.push(e);
+      inserted++;
+    }
+    return Promise.resolve(inserted);
   }
 }
