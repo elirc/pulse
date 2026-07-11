@@ -41,6 +41,18 @@ export interface QueuedEvent {
   ingestedAt: string; // server receive time, ISO
 }
 
+/** Validates a QueuedEvent read back off the stream. A corrupt/foreign entry that fails this is a poison pill —
+ *  the consumer dead-letters it rather than crashing the whole group. */
+export const QueuedEventSchema = z.object({
+  uuid: z.string().min(1),
+  projectId: z.string().min(1),
+  distinctId: z.string().min(1),
+  name: z.string().min(1),
+  props: z.record(z.unknown()),
+  ts: z.string().min(1),
+  ingestedAt: z.string().min(1),
+});
+
 /** A stored event (what the events table holds). `ingestedAt` is server time; `ts` is event time. */
 export interface StoredEvent {
   id: string;

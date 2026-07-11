@@ -2,6 +2,7 @@ import Redis from "ioredis";
 import { RedisEventStream, type RedisLike } from "@pulse/stream";
 import type { QueuedEvent } from "@pulse/shared";
 import { PrismaEventStore } from "./store";
+import { StreamDeadLetterQueue, type DeadLetterRecord } from "./dlq";
 import { processNewBatch, processPendingBatch } from "./worker";
 import { env } from "./env";
 
@@ -13,8 +14,14 @@ async function main(): Promise<void> {
     env.STREAM_KEY,
     env.CONSUMER_NAME,
   );
+  const dlqStream = new RedisEventStream<DeadLetterRecord>(
+    redis as unknown as RedisLike,
+    env.DLQ_KEY,
+    env.CONSUMER_NAME,
+  );
   const store = new PrismaEventStore();
-  const deps = { stream, store, group: env.CONSUMER_GROUP, batchSize: env.BATCH_SIZE };
+  const dlq = new StreamDeadLetterQueue(dlqStream);
+  const deps = { stream, store, dlq, group: env.CONSUMER_GROUP, batchSize: env.BATCH_SIZE };
 
   await stream.ensureGroup(env.CONSUMER_GROUP);
   console.log(`pulse consumer '${env.CONSUMER_NAME}' on group '${env.CONSUMER_GROUP}'`);

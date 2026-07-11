@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { InMemoryEventStream } from "@pulse/stream";
 import type { QueuedEvent } from "@pulse/shared";
 import { InMemoryEventStore } from "./store";
+import { InMemoryDeadLetterQueue } from "./dlq";
 import { enrich } from "./enrich";
 import { processPendingBatch } from "./worker";
 
@@ -39,7 +40,7 @@ describe("crash mid-batch → redelivery (S04)", () => {
     await store.insertBatch(delivered.map((e) => enrich(e.data)));
 
     // Restart: the un-acked entries are redelivered and processed again.
-    await processPendingBatch({ stream, store, group: GROUP, batchSize: 100 });
+    await processPendingBatch({ stream, store, dlq: new InMemoryDeadLetterQueue(), group: GROUP, batchSize: 100 });
 
     const uuids = store.events.map((e) => e.uuid);
     expect(uuids.filter((u) => u === "dup-1")).toHaveLength(1);
