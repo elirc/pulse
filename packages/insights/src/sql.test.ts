@@ -15,9 +15,9 @@ describe("compileTrendSql (S05)", () => {
     expect(params).toContain(30); // default lookback window
   });
 
-  it("unique persons uses count(distinct distinctId)", () => {
+  it("unique persons counts distinct person (personId, falling back to distinctId) — S06", () => {
     const { text } = compileTrendSql(spec({ metric: "unique" }), "p1");
-    expect(text).toContain('count(distinct "distinctId")');
+    expect(text).toContain('count(distinct coalesce("personId", "distinctId"))');
   });
 
   it("event name and property filters are bound params, not inlined", () => {
