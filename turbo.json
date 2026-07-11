@@ -10,7 +10,9 @@
       "dependsOn": ["^build"]
     },
     "test": {},
-    "budget": {},
+    "budget": {
+      "dependsOn": ["build"]
+    },
     "lint": {},
     "dev": {
       "cache": false,
