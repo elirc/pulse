@@ -94,9 +94,18 @@ importers:
         specifier: ^3.23.8
         version: 3.25.76
     devDependencies:
+      '@pulse/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@pulse/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@pulse/ingest':
+        specifier: workspace:*
+        version: link:../ingest
+      '@pulse/insights':
+        specifier: workspace:*
+        version: link:../../packages/insights
       '@types/node':
         specifier: ^22.7.9
         version: 22.20.1
