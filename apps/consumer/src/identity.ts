@@ -15,6 +15,14 @@ export interface PersonStore {
   findPersonId(projectId: string, distinctId: string): Promise<string | null>;
   /** Create a Person and map `distinctId` to it, returning the new personId. */
   createPersonWithMapping(projectId: string, distinctId: string): Promise<string>;
+  /** A comparable creation order for a person (epoch ms or a sequence) — for deterministic "oldest wins". */
+  createdOrder(personId: string): Promise<number>;
+  /** Re-point every mapping from `fromPersonId` to `toPersonId`; returns the distinctIds that moved. */
+  remapMappings(projectId: string, fromPersonId: string, toPersonId: string): Promise<string[]>;
+  /** Fold `loserId`'s properties into `winnerId` ($set_once on the winner is not overwritten). */
+  foldProperties(winnerId: string, loserId: string): Promise<void>;
+  /** Delete a person (after its mappings + properties have been folded away). */
+  deletePerson(personId: string): Promise<void>;
 }
 
 export interface ResolverOptions {
@@ -54,6 +62,35 @@ export class IdentityResolver {
     personId ??= await this.store.createPersonWithMapping(projectId, distinctId);
     this.cache.set(key, { personId, expiresAt: this.now() + this.ttlMs });
     return personId;
+  }
+
+  /**
+   * identify: an anonymous id and a known user id become ONE person. The older person wins (deterministic, so a
+   * re-merge is idempotent); the loser's mappings + properties fold into the winner and the loser is deleted.
+   * The event rows are NEVER rewritten — only the mapping table changes, so history stays intact and future
+   * events for either id resolve to the winner. The cache is re-primed for every moved id, or those events
+   * would mis-attribute to the deleted person for the TTL window.
+   *
+   * NOTE (S06): this is the NAIVE version — no lock. Two concurrent identifies for the same user can each create
+   * a person and tangle the merge. The race is demonstrated and fixed in the next two commits.
+   */
+  async identify(projectId: string, anonDistinctId: string, userDistinctId: string): Promise<string> {
+    const anonPerson = await this.resolve(projectId, anonDistinctId);
+    const userPerson = await this.resolve(projectId, userDistinctId);
+    if (anonPerson === userPerson) return userPerson;
+
+    const [anonOrder, userOrder] = await Promise.all([
+      this.store.createdOrder(anonPerson),
+      this.store.createdOrder(userPerson),
+    ]);
+    const winner = anonOrder <= userOrder ? anonPerson : userPerson;
+    const loser = winner === anonPerson ? userPerson : anonPerson;
+
+    const moved = await this.store.remapMappings(projectId, loser, winner);
+    await this.store.foldProperties(winner, loser);
+    await this.store.deletePerson(loser);
+    for (const distinctId of moved) this.prime(projectId, distinctId, winner);
+    return winner;
   }
 
   /** Drop a cache entry (used after a merge remaps a distinctId to a different person). */

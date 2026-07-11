@@ -42,6 +42,11 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
       continue;
     }
     const enriched = enrich(parsed.data);
+    // An $identify event carries the previous anonymous id in props; merge before resolving so the event (and
+    // all future ones for either id) resolves to the surviving person.
+    if (enriched.name === "$identify" && typeof enriched.props.$anon_distinct_id === "string") {
+      await deps.resolver.identify(enriched.projectId, enriched.props.$anon_distinct_id, enriched.distinctId);
+    }
     const personId = await deps.resolver.resolve(enriched.projectId, enriched.distinctId);
     good.push({ ...enriched, personId });
     ackIds.push(entry.id);
