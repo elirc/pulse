@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import { z, ZodError } from "zod";
 import { prisma, PrismaKeyStore } from "@pulse/db";
 import { CachedKeyResolver, keyCan } from "@pulse/auth";
+import { TrendSpecSchema, compileTrendSql, foldTopNRows, type FlatRow } from "@pulse/insights";
 import type { DailyCount } from "@pulse/shared";
 import { env } from "./env";
 import { requireSession } from "./auth";
@@ -27,6 +28,24 @@ const IssueKeyBody = z.object({
   type: z.enum(["WRITE", "SECRET"]),
   label: z.string().max(100).default(""),
 });
+
+const TrendBody = z.object({
+  projectId: z.string().min(1).default("demo-project"),
+  spec: TrendSpecSchema,
+});
+
+const SaveInsightBody = z.object({
+  projectId: z.string().min(1).default("demo-project"),
+  name: z.string().min(1).max(200),
+  definition: TrendSpecSchema,
+});
+
+/** One flat row of a compiled trend query. */
+interface TrendRow {
+  bucket: string;
+  label?: string;
+  value: bigint;
+}
 
 /**
  * The app API (S01) — the ANALYST-facing surface, deployed separately from ingest (ADR-0001). Dashboards and
@@ -127,6 +146,56 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       select: { id: true, name: true, distinctId: true, ts: true, ingestedAt: true },
     });
     return events;
+  });
+
+  /**
+   * Trend query (S05): compile a validated TrendSpec to parameterized SQL and run it. The spec is a closed AST
+   * (see @pulse/insights) — user input reaches the query only as bound params, never as SQL text. Returns flat
+   * { bucket, label, value } rows; the web pivots them into a chart. (Analyst-facing; auth hardening later.)
+   */
+  app.post<{ Body: unknown }>("/insights/trend", async (req) => {
+    const body = TrendBody.parse(req.body);
+    const { text, params } = compileTrendSql(body.spec, body.projectId);
+    const rows = await prisma.$queryRawUnsafe<TrendRow[]>(text, ...params);
+    const flat: FlatRow[] = rows.map((r) => ({ bucket: r.bucket, label: r.label ?? null, value: Number(r.value) }));
+    // Breakdowns fold the long tail into "Other" so a high-cardinality property can't return thousands of series.
+    return body.spec.breakdown ? foldTopNRows(flat, body.spec.topN) : flat;
+  });
+
+  /** Save an insight — the query DEFINITION, versioned, not its results. */
+  app.post<{ Body: unknown }>("/insights", async (req, reply) => {
+    const body = SaveInsightBody.parse(req.body);
+    const row = await prisma.insight.create({
+      data: { projectId: body.projectId, name: body.name, definition: body.definition as object },
+      select: { id: true },
+    });
+    return reply.code(201).send({ id: row.id });
+  });
+
+  /** List saved insights for a project. */
+  app.get<{ Querystring: { projectId?: string } }>("/insights", async (req) => {
+    const projectId = req.query.projectId ?? "demo-project";
+    return prisma.insight.findMany({
+      where: { projectId },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true, name: true, defVersion: true, definition: true, updatedAt: true },
+    });
+  });
+
+  /**
+   * Live events feed (S05): the latest 100 events for a project, newest first, for the "is it working?" view.
+   * Ordered by server receive time so events show up in arrival order.
+   */
+  app.get<{ Querystring: { projectId?: string } }>("/events/live", async (req) => {
+    const projectId = req.query.projectId ?? "demo-project";
+    type LiveRow = { id: string; name: string; distinctId: string; ts: string };
+    const rows = await prisma.$queryRaw<LiveRow[]>`
+      SELECT "id", "name", "distinctId", to_char("ts", 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ts
+      FROM "Event"
+      WHERE "projectId" = ${projectId}
+      ORDER BY "ingestedAt" DESC
+      LIMIT 100`;
+    return rows;
   });
 
   /**

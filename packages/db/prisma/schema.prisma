@@ -59,6 +59,22 @@ model Project {
   @@index([orgId])
 }
 
+// A saved insight (S05) is a stored QUERY DEFINITION, not stored results. Persisting the definition (a
+// versioned TrendSpec JSON) — not a materialized answer — is what lets S07 swap the query backend
+// (Postgres → ClickHouse) under a hundred saved insights without touching any of them: migrate the compiler,
+// not the data. `defVersion` lets the compiler evolve the spec format while old insights keep resolving.
+model Insight {
+  id         String   @id @default(cuid())
+  projectId  String
+  name       String
+  defVersion Int      @default(1)
+  definition Json // a TrendSpec (see @pulse/insights)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([projectId])
+}
+
 // A credential's capability follows its audience. A WRITE key ships in public page source to strangers,
 // so it may only APPEND events; a SECRET key never leaves a server, so it may READ. The type is readable
 // from the plaintext prefix (pw_live_… / ps_live_…), stored so support can identify a key without ever

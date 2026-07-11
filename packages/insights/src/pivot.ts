@@ -1,0 +1,47 @@
+/**
+ * Top-N bucketing for breakdown rows (S05). An unbounded `GROUP BY` on a user-supplied property is a memory
+ * grenade: break down by `$url` on a big site and you get a series per distinct URL — thousands of them,
+ * useless as a chart and expensive to ship. So we keep the top-N labels by total and fold the long tail into a
+ * single "Other" series. 'Other' is a design pattern, not an afterthought.
+ *
+ * NOTE (unique metric): folding by SUMMING already-aggregated counts over-counts for `count(distinct person)`,
+ * because the same person can appear under several folded labels. The exact answer needs the raw events (the
+ * in-memory interpreter) or an HLL merge — which is one more reason S07/S12 revisit approximate distinct.
+ */
+import { OTHER_BUCKET } from "./spec";
+
+export interface FlatRow {
+  bucket: string;
+  label: string | null;
+  value: number;
+}
+
+export function foldTopNRows(rows: FlatRow[], topN: number, otherLabel: string = OTHER_BUCKET): FlatRow[] {
+  const totals = new Map<string, number>();
+  for (const r of rows) {
+    const l = r.label ?? "(none)";
+    totals.set(l, (totals.get(l) ?? 0) + r.value);
+  }
+  const top = new Set(
+    [...totals.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topN)
+      .map(([l]) => l),
+  );
+
+  // Nested bucket → label → value, so labels containing any character (spaces, separators) round-trip cleanly.
+  const merged = new Map<string, Map<string, number>>();
+  for (const r of rows) {
+    const original = r.label ?? "(none)";
+    const label = top.has(original) ? original : otherLabel;
+    let byLabel = merged.get(r.bucket);
+    if (!byLabel) merged.set(r.bucket, (byLabel = new Map()));
+    byLabel.set(label, (byLabel.get(label) ?? 0) + r.value);
+  }
+
+  const out: FlatRow[] = [];
+  for (const [bucket, byLabel] of merged) {
+    for (const [label, value] of byLabel) out.push({ bucket, label, value });
+  }
+  return out.sort((a, b) => a.bucket.localeCompare(b.bucket) || (a.label ?? "").localeCompare(b.label ?? ""));
+}
