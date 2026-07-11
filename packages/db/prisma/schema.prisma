@@ -1,0 +1,32 @@
+// Prisma schema for Pulse.
+// S01: the walking skeleton — a single, deliberately-naive `Event` table in Postgres. This is THE baseline the
+// whole course measures against: no partitioning, no columnar store, a synchronous insert on the hot path. It
+// is correct, and ADR-0002 writes down the numeric exit criteria at which it stops being enough — S07 measures
+// us across that line and migrates the events store to ClickHouse. Metadata (projects, persons, flags) stays in
+// Postgres; the OLTP/OLAP split is forced by S07, not guessed now.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// One row per tracked action. `props` is a schemaless JSONB bag (the event's shape is the SDK caller's, not
+// ours). `ts` is EVENT time (client clock — trusted in S1, a flaw revisited in S04/S13); `ingestedAt` is
+// SERVER time. In S01 the projectId is a fixed demo value; real projects + write keys arrive in S02.
+model Event {
+  id         String   @id @default(cuid())
+  projectId  String   @default("demo-project")
+  distinctId String
+  name       String
+  props      Json     @default("{}")
+  ts         DateTime // event time
+  ingestedAt DateTime @default(now()) // server time
+
+  // The naive index: by project + event time, for the daily-counts scan. BRIN vs btree, partitioning, and the
+  // columnar rethink are deferred — S07's job, once the numbers demand it.
+  @@index([projectId, ts])
+}
