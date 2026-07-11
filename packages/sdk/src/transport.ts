@@ -9,6 +9,9 @@
  * body is always a JSON array of envelopes.
  */
 import type { EventEnvelope } from "./types";
+import type { SafeStorage } from "./storage";
+
+const QUEUE_KEY = "pulse_queue";
 
 export interface Transport {
   enqueue(event: EventEnvelope): void;
@@ -96,6 +99,10 @@ export interface BatchTransportConfig {
   flushAt?: number;
   /** Flush at least this often, ms. Default 5000. */
   flushIntervalMs?: number;
+  /** Persist the pending queue here so events survive a reload / backend outage. */
+  storage?: SafeStorage;
+  /** Cap on buffered events; oldest are dropped past this. Default 1000. */
+  maxQueue?: number;
 }
 
 /** The batching transport: a queue drained by the three triggers above. */
@@ -105,27 +112,54 @@ export class BatchTransport implements Transport {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly send: SendFn;
   private readonly beacon: BeaconFn | undefined;
+  private readonly storage: SafeStorage | undefined;
+  private readonly maxQueue: number;
 
   constructor(cfg: BatchTransportConfig) {
     this.send = cfg.send;
     this.beacon = cfg.beacon;
     this.flushAt = cfg.flushAt ?? 10;
+    this.storage = cfg.storage;
+    this.maxQueue = cfg.maxQueue ?? 1000;
+    this.queue = this.load(); // rehydrate anything left over from a previous page load
     const interval = cfg.flushIntervalMs ?? 5000;
     this.timer = setInterval(() => this.flush(), interval);
   }
 
   enqueue(event: EventEnvelope): void {
     this.queue.push(event);
+    // Overflow: when a backend outage lets the queue grow past the cap, drop the OLDEST events. Newer data is
+    // usually more valuable, and an unbounded queue would eventually blow the localStorage quota.
+    if (this.queue.length > this.maxQueue) this.queue.splice(0, this.queue.length - this.maxQueue);
+    this.persist();
     if (this.queue.length >= this.flushAt) this.flush();
   }
 
   flush(): void {
     if (this.queue.length === 0) return;
     // Drain the queue synchronously BEFORE the async send, so a second flush (timer + size firing together)
-    // can never send the same events twice. On failure the events are dropped until retry (next commit).
+    // can never send the same events twice.
     const batch = this.queue;
     this.queue = [];
+    this.persist();
     void this.send(batch).catch(() => {});
+  }
+
+  private persist(): void {
+    if (!this.storage) return;
+    this.storage.set(QUEUE_KEY, JSON.stringify(this.queue));
+  }
+
+  private load(): EventEnvelope[] {
+    if (!this.storage) return [];
+    const raw = this.storage.get(QUEUE_KEY);
+    if (!raw) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as EventEnvelope[]) : [];
+    } catch {
+      return []; // corrupt persisted queue is discarded, never thrown
+    }
   }
 
   /** On a dying page: drain synchronously, prefer sendBeacon, fall back to a keepalive fetch. */
@@ -133,6 +167,7 @@ export class BatchTransport implements Transport {
     if (this.queue.length === 0) return;
     const batch = this.queue;
     this.queue = [];
+    this.persist();
     if (this.beacon && this.beacon(batch)) return; // accepted by the browser; done
     void this.send(batch).catch(() => {}); // keepalive fetch — may or may not survive the unload
   }

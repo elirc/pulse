@@ -4,28 +4,32 @@
  * stranger's page arrives in a later commit; the shape is fixed now.
  */
 import { Pulse } from "./pulse";
+import { guard } from "./guard";
 import type { PulseOptions } from "./types";
 
 const instance = new Pulse();
 
+// Every public entry point runs inside the never-throw boundary: a bug in here can never throw into the host
+// page. Errors are swallowed and (optionally) reported through the caller's `onError`.
 export function init(options: PulseOptions): void {
-  instance.init(options);
+  guard(() => instance.init(options), options.onError);
 }
 
 export function capture(name: string, props?: Record<string, unknown>): void {
-  instance.capture(name, props);
+  guard(() => instance.capture(name, props), instance.onError);
 }
 
 export function identify(distinctId: string): void {
-  instance.identify(distinctId);
+  guard(() => instance.identify(distinctId), instance.onError);
 }
 
 export function reset(): void {
-  instance.reset();
+  guard(() => instance.reset(), instance.onError);
 }
 
 export type { EventEnvelope, PulseOptions } from "./types";
 export { Pulse } from "./pulse";
+export { guard } from "./guard";
 export { uuid, loadOrCreateDistinctId } from "./id";
 export { browserStorage, memoryStorage, type SafeStorage } from "./storage";
 export {

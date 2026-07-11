@@ -18,12 +18,15 @@ export class Pulse {
   private transport: Transport | null = null;
   private storage: SafeStorage = browserStorage();
   private distinctId = "";
+  /** Host-supplied sink for the SDK's own errors, used by the never-throw boundary in index.ts. */
+  onError: ((error: unknown) => void) | undefined;
 
   constructor(private readonly deps: PulseDeps = {}) {
     if (deps.storage) this.storage = deps.storage;
   }
 
   init(options: PulseOptions): void {
+    this.onError = options.onError;
     const host = options.apiHost ?? DEFAULT_HOST;
     this.transport =
       this.deps.transport ??
@@ -32,6 +35,8 @@ export class Pulse {
         beacon: beaconSend(host, options.writeKey),
         flushAt: options.flushAt,
         flushIntervalMs: options.flushIntervalMs,
+        storage: this.storage,
+        maxQueue: options.maxQueue,
       });
     this.distinctId = loadOrCreateDistinctId(this.storage);
     this.installLifecycleFlush();
