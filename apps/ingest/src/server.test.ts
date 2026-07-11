@@ -1,23 +1,25 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { CachedKeyResolver, InMemoryKeyStore, generateApiKey } from "@pulse/auth";
+import { InMemoryEventStream } from "@pulse/stream";
+import type { QueuedEvent } from "@pulse/shared";
 import { buildIngestServer } from "./server";
 
-// A resolver over an in-memory key store — no database. This is how CI authenticates the hot path: the same
-// injection seam production uses for Prisma, wired to a fake here. /health and validation touch no DB; the
-// insert path is verified via typecheck + build and exercised only in local/lab load tests.
+// Resolver + stream are both in-memory — no key DB, no Redis. This is how CI exercises the enqueue-only hot
+// path: validation and auth run for real; the "storage" is a stream fake we can inspect.
 const store = new InMemoryKeyStore();
 const writeKey = generateApiKey("WRITE");
 store.add(writeKey.hash, { id: "k1", projectId: "proj1", type: "WRITE", revokedAt: null });
-const resolver = new CachedKeyResolver(store, { rng: () => 1 }); // rng:1 → never samples lastUsedAt in tests
+const resolver = new CachedKeyResolver(store, { rng: () => 1 });
+const stream = new InMemoryEventStream<QueuedEvent>();
 
-const app = buildIngestServer({ resolver });
+const app = buildIngestServer({ resolver, stream });
 const authed = { authorization: `Bearer ${writeKey.plaintext}` };
 
 afterAll(async () => {
   await app.close();
 });
 
-describe("ingest server (S02)", () => {
+describe("ingest server — enqueue-only (S04)", () => {
   it("GET /health returns ok", async () => {
     const res = await app.inject({ method: "GET", url: "/health" });
     expect(res.statusCode).toBe(200);
@@ -29,7 +31,7 @@ describe("ingest server (S02)", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("rejects an event with an unknown write key (401)", async () => {
+  it("rejects an unknown write key (401)", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/e",
@@ -39,13 +41,21 @@ describe("ingest server (S02)", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("with a valid key, rejects an event with no name (400) before touching the DB", async () => {
+  it("rejects an invalid event (400)", async () => {
     const res = await app.inject({ method: "POST", url: "/e", headers: authed, payload: { distinctId: "u1" } });
     expect(res.statusCode).toBe(400);
   });
 
-  it("with a valid key, rejects an event with no distinctId (400)", async () => {
-    const res = await app.inject({ method: "POST", url: "/e", headers: authed, payload: { name: "$pageview" } });
-    expect(res.statusCode).toBe(400);
+  it("accepts a valid event with 202 and enqueues it (accepted, not processed)", async () => {
+    const before = await stream.depth();
+    const res = await app.inject({
+      method: "POST",
+      url: "/e",
+      headers: authed,
+      payload: { name: "$pageview", distinctId: "u1", uuid: "evt-1" },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: 1 });
+    expect(await stream.depth()).toBe(before + 1);
   });
 });

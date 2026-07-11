@@ -5,6 +5,8 @@ const EnvSchema = z.object({
   INGEST_PORT: z.coerce.number().default(3002),
   WEB_URL: z.string().url().default("http://localhost:5173"),
   DATABASE_URL: z.string().url().optional(), // optional so the server boots (health) without a DB in dev/CI
+  REDIS_URL: z.string().default("redis://localhost:6379"),
+  STREAM_KEY: z.string().default("pulse:events"),
 });
 
 export const env = EnvSchema.parse(process.env);
