@@ -1,9 +1,16 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import { prisma } from "@pulse/db";
 import type { DailyCount } from "@pulse/shared";
 import { env } from "./env";
+import { requireSession } from "./auth";
+import { assertProjectInOrg, issueKey, listKeys } from "./keys";
+
+const IssueKeyBody = z.object({
+  type: z.enum(["WRITE", "SECRET"]),
+  label: z.string().max(100).default(""),
+});
 
 /**
  * The app API (S01) — the ANALYST-facing surface, deployed separately from ingest (ADR-0001). Dashboards and
@@ -23,6 +30,44 @@ export function buildApiServer(): FastifyInstance {
   });
 
   app.get("/health", async () => ({ status: "ok" }));
+
+  /**
+   * Issue a key for a project (S02). Human action → requires a SESSION, not a key. The plaintext is in the
+   * response body exactly once; after this handler returns, only its hash exists anywhere. 201 with a loud
+   * warning so the caller knows there is no second chance.
+   */
+  app.post<{ Params: { projectId: string }; Body: unknown }>(
+    "/projects/:projectId/keys",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      const body = IssueKeyBody.parse(req.body);
+      const session = req.session!; // requireSession guarantees this
+      if (!(await assertProjectInOrg(req.params.projectId, session.orgId))) {
+        return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Project not found" } });
+      }
+      const issued = await issueKey(req.params.projectId, body.type, body.label);
+      return reply.code(201).send({
+        id: issued.id,
+        type: issued.type,
+        prefix: issued.prefix,
+        key: issued.plaintext,
+        warning: "This is the only time the key is shown. Store it now — we keep only a hash.",
+      });
+    },
+  );
+
+  /** List a project's keys (prefixes only — never the secret). */
+  app.get<{ Params: { projectId: string } }>(
+    "/projects/:projectId/keys",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      const session = req.session!;
+      if (!(await assertProjectInOrg(req.params.projectId, session.orgId))) {
+        return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Project not found" } });
+      }
+      return listKeys(req.params.projectId);
+    },
+  );
 
   /**
    * Daily event counts for the last 30 days — one GROUP BY over the naive events table. This is the query S07
