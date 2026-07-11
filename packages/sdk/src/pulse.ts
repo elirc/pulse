@@ -5,7 +5,7 @@
 import type { EventEnvelope, PulseOptions } from "./types";
 import { loadOrCreateDistinctId, uuid, DISTINCT_ID_KEY } from "./id";
 import { browserStorage, type SafeStorage } from "./storage";
-import { BatchTransport, httpSend, type Transport } from "./transport";
+import { BatchTransport, httpSend, beaconSend, type Transport } from "./transport";
 
 const DEFAULT_HOST = "https://ingest.pulse.example";
 
@@ -29,6 +29,7 @@ export class Pulse {
       this.deps.transport ??
       new BatchTransport({
         send: httpSend(host, options.writeKey),
+        beacon: beaconSend(host, options.writeKey),
         flushAt: options.flushAt,
         flushIntervalMs: options.flushIntervalMs,
       });
@@ -40,11 +41,12 @@ export class Pulse {
    *  sendBeacon in the next commit; here it's a best-effort flush so the last batch isn't stranded. */
   private installLifecycleFlush(): void {
     if (typeof document === "undefined") return; // non-DOM host (tests without jsdom, SSR)
-    const flush = (): void => this.transport?.flush();
+    // visibilitychange (tab hidden) is the reliable "user is leaving" signal on mobile; pagehide is the
+    // desktop close/navigate. Hidden → a normal flush (page may come back); pagehide → the beacon path.
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") flush();
+      if (document.visibilityState === "hidden") this.transport?.flush();
     });
-    globalThis.addEventListener?.("pagehide", flush);
+    globalThis.addEventListener?.("pagehide", () => this.transport?.flushOnUnload());
   }
 
   capture(name: string, props: Record<string, unknown> = {}): void {
