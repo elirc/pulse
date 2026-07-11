@@ -11,6 +11,7 @@ export default tseslint.config(
       "**/generated/**",
       "**/*.config.*",
       "**/e2e/**",
+      "load/**",
     ],
   },
   js.configs.recommended,

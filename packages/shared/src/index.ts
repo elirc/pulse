@@ -20,8 +20,38 @@ export const EventInputSchema = z.object({
   props: z.record(z.unknown()).default({}),
   /** Client event time (ISO or epoch ms). Optional — the server fills in if absent. */
   ts: z.union([z.string(), z.number()]).optional(),
+  /** Client-minted idempotency key (SDK envelope, S03). Optional; the server mints one if absent. Dedupe (S04)
+   *  and backfill idempotency (S07) both key on this. */
+  uuid: z.string().min(1).max(200).optional(),
 });
 export type EventInput = z.infer<typeof EventInputSchema>;
+
+/**
+ * What rides on the ingestion stream (S04): the validated event plus server-resolved context. It is a
+ * serializable snapshot (all strings) because it crosses a Redis Streams boundary between the ingest and
+ * consumer deployables. `uuid` is the dedupe key; `ts` is still the client clock (flaw territory, S13).
+ */
+export interface QueuedEvent {
+  uuid: string;
+  projectId: string;
+  distinctId: string;
+  name: string;
+  props: Record<string, unknown>;
+  ts: string; // event time, ISO
+  ingestedAt: string; // server receive time, ISO
+}
+
+/** Validates a QueuedEvent read back off the stream. A corrupt/foreign entry that fails this is a poison pill —
+ *  the consumer dead-letters it rather than crashing the whole group. */
+export const QueuedEventSchema = z.object({
+  uuid: z.string().min(1),
+  projectId: z.string().min(1),
+  distinctId: z.string().min(1),
+  name: z.string().min(1),
+  props: z.record(z.unknown()),
+  ts: z.string().min(1),
+  ingestedAt: z.string().min(1),
+});
 
 /** A stored event (what the events table holds). `ingestedAt` is server time; `ts` is event time. */
 export interface StoredEvent {

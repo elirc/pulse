@@ -9,9 +9,18 @@ import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 
+/** Operational metrics for the ingestion pipeline — the numbers become an operational surface (S15 alerts here). */
+export interface IngestOps {
+  streamDepth(): Promise<number>;
+  consumerPending(): Promise<number>;
+  dlqDepth(): Promise<number>;
+}
+
 export interface ApiServerOptions {
   /** Injectable so CI resolves keys against an in-memory store; production defaults to Prisma. */
   resolver?: CachedKeyResolver;
+  /** Ingestion pipeline metrics source; wired to Redis in production, an in-memory fake in tests. */
+  ingestOps?: IngestOps;
 }
 
 const IssueKeyBody = z.object({
@@ -39,6 +48,23 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   });
 
   app.get("/health", async () => ({ status: "ok" }));
+
+  /**
+   * Ingestion pipeline health (S04): stream backlog, consumer pending (in-flight, unacked), and DLQ size.
+   * Making the pipeline's numbers a queryable surface is what lets S15 alert on them ("consumer lag > N for
+   * M minutes") instead of discovering a backlog from angry customers.
+   */
+  app.get("/ops/ingest", async (_req, reply) => {
+    if (!opts.ingestOps) {
+      return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Ingest metrics not wired" } });
+    }
+    const [streamDepth, consumerPending, dlqDepth] = await Promise.all([
+      opts.ingestOps.streamDepth(),
+      opts.ingestOps.consumerPending(),
+      opts.ingestOps.dlqDepth(),
+    ]);
+    return { streamDepth, consumerPending, dlqDepth };
+  });
 
   /**
    * Issue a key for a project (S02). Human action → requires a SESSION, not a key. The plaintext is in the

@@ -94,6 +94,11 @@ model ApiKey {
 // key to Project on purpose: events migrate to ClickHouse in S07, and a cross-store FK cannot be enforced.
 model Event {
   id         String   @id @default(cuid())
+  // Client-minted idempotency key (SDK envelope → ingest → stream). The unique index is the dedup mechanism:
+  // a re-delivered event hits ON CONFLICT DO NOTHING and inserts nothing, turning at-least-once delivery into
+  // effective exactly-once. NOTE (S07): a unique btree over every event's uuid grows unbounded — the columnar
+  // store can't enforce it, so S07 must re-solve dedup (TTL'd dedup set / merge-time dedup).
+  uuid       String   @unique
   projectId  String   @default("demo-project")
   distinctId String
   name       String
