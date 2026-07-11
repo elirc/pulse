@@ -5,9 +5,15 @@
  */
 import { Pulse } from "./pulse";
 import { guard } from "./guard";
+import { lookupDevice } from "./enrich";
 import type { PulseOptions } from "./types";
 
 const instance = new Pulse();
+
+// [LAB BUG #3] Accidental client-side enrichment — pulls a large dataset into the shipped bundle.
+export function deviceFor(fingerprint: string): string {
+  return lookupDevice(fingerprint);
+}
 
 // Every public entry point runs inside the never-throw boundary: a bug in here can never throw into the host
 // page. Errors are swallowed and (optionally) reported through the caller's `onError`.

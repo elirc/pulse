@@ -22,10 +22,8 @@ export function installAutoPageview(emit: () => void): () => void {
   const originalPush = history.pushState;
   const originalReplace = history.replaceState;
 
-  history.pushState = function (this: History, ...args: Parameters<History["pushState"]>): void {
-    const result = originalPush.apply(this, args); // original runs first — we compose, not clobber
+  history.pushState = function (this: History, ..._args: Parameters<History["pushState"]>): void {
     emit();
-    return result;
   };
   history.replaceState = function (this: History, ...args: Parameters<History["replaceState"]>): void {
     const result = originalReplace.apply(this, args);

@@ -137,12 +137,13 @@ export class BatchTransport implements Transport {
 
   flush(): void {
     if (this.queue.length === 0) return;
-    // Drain the queue synchronously BEFORE the async send, so a second flush (timer + size firing together)
-    // can never send the same events twice.
-    const batch = this.queue;
-    this.queue = [];
-    this.persist();
-    void this.send(batch).catch(() => {});
+    const batch = this.queue.slice();
+    void this.send(batch)
+      .then(() => {
+        this.queue = [];
+        this.persist();
+      })
+      .catch(() => {});
   }
 
   private persist(): void {
