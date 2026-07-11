@@ -182,6 +182,42 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     });
   });
 
+  /** Resolve a distinctId to its person (S06) — the entry point for the profile UI. */
+  app.get<{ Querystring: { projectId?: string; distinctId?: string } }>("/persons/resolve", async (req, reply) => {
+    const projectId = req.query.projectId ?? "demo-project";
+    const distinctId = req.query.distinctId ?? "";
+    const mapping = await prisma.distinctIdMapping.findUnique({
+      where: { projectId_distinctId: { projectId, distinctId } },
+      select: { personId: true },
+    });
+    if (!mapping) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "No person for that id" } });
+    return { personId: mapping.personId };
+  });
+
+  /** A person profile (S06): properties + the full list of distinctIds that merged into them. */
+  app.get<{ Params: { personId: string } }>("/persons/:personId", async (req, reply) => {
+    const person = await prisma.person.findUnique({
+      where: { id: req.params.personId },
+      select: { id: true, properties: true, createdAt: true, mappings: { select: { distinctId: true } } },
+    });
+    if (!person) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Person not found" } });
+    return {
+      id: person.id,
+      properties: person.properties,
+      createdAt: person.createdAt,
+      distinctIds: person.mappings.map((m) => m.distinctId),
+    };
+  });
+
+  /** A person's event timeline (S06): their recent events, newest first, resolved through personId. */
+  app.get<{ Params: { personId: string } }>("/persons/:personId/events", async (req) => {
+    type Row = { id: string; name: string; ts: string };
+    return prisma.$queryRaw<Row[]>`
+      SELECT "id", "name", to_char("ts", 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ts
+      FROM "Event" WHERE "personId" = ${req.params.personId}
+      ORDER BY "ts" DESC LIMIT 100`;
+  });
+
   /**
    * Live events feed (S05): the latest 100 events for a project, newest first, for the "is it working?" view.
    * Ordered by server receive time so events show up in arrival order.
