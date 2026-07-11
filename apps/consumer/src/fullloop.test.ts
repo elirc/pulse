@@ -7,6 +7,8 @@ import { computeTrend, TrendSpecSchema, type EventLike } from "@pulse/insights";
 import type { QueuedEvent } from "@pulse/shared";
 import { InMemoryEventStore } from "./store";
 import { InMemoryDeadLetterQueue } from "./dlq";
+import { IdentityResolver } from "./identity";
+import { InMemoryPersonStore } from "./personstore";
 import { drain } from "./worker";
 
 /**
@@ -57,6 +59,7 @@ describe("full loop: SDK → ingest → stream → consumer → store → trend 
       stream,
       store,
       dlq: new InMemoryDeadLetterQueue(),
+      resolver: new IdentityResolver(new InMemoryPersonStore()),
       group: "inserters",
       batchSize: 100,
     });

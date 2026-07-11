@@ -12,8 +12,13 @@
 import { prisma } from "@pulse/db";
 import type { QueuedEvent } from "@pulse/shared";
 
+/** A QueuedEvent with its resolved person (S06) — what actually gets stored. */
+export interface StorableEvent extends QueuedEvent {
+  personId: string;
+}
+
 export interface EventStore {
-  insertBatch(events: QueuedEvent[]): Promise<number>;
+  insertBatch(events: StorableEvent[]): Promise<number>;
 }
 
 export class PrismaEventStore implements EventStore {
@@ -21,13 +26,14 @@ export class PrismaEventStore implements EventStore {
   // (higher throughput) but holds a longer transaction and raises tail latency + memory. The BATCH_SIZE env
   // (default 200) is the knob; the PR body reports the throughput at a couple of settings. createMany issues a
   // single multi-row INSERT — the point of this stage over N single inserts.
-  async insertBatch(events: QueuedEvent[]): Promise<number> {
+  async insertBatch(events: StorableEvent[]): Promise<number> {
     if (events.length === 0) return 0;
     const result = await prisma.event.createMany({
       data: events.map((e) => ({
         uuid: e.uuid,
         projectId: e.projectId,
         distinctId: e.distinctId,
+        personId: e.personId,
         name: e.name,
         props: e.props as object,
         ts: new Date(e.ts),
@@ -45,10 +51,10 @@ export class PrismaEventStore implements EventStore {
 /** In-memory store for tests — mirrors the unique-uuid constraint (dedupes on uuid) and records each batch's
  *  attempted size so a test can prove both multi-row batching and idempotent apply. */
 export class InMemoryEventStore implements EventStore {
-  public readonly events: QueuedEvent[] = [];
+  public readonly events: StorableEvent[] = [];
   public readonly batches: number[] = [];
   private readonly seen = new Set<string>();
-  insertBatch(events: QueuedEvent[]): Promise<number> {
+  insertBatch(events: StorableEvent[]): Promise<number> {
     this.batches.push(events.length);
     let inserted = 0;
     for (const e of events) {

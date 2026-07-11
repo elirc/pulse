@@ -144,6 +144,10 @@ model Event {
   uuid       String   @unique
   projectId  String   @default("demo-project")
   distinctId String
+  // Resolved on the WRITE path (S06) and frozen here. Unique-user queries count distinct personId, not
+  // distinctId — the true count once identity merges collapse a person's many ids. Nullable for events
+  // predating identity resolution.
+  personId   String?
   name       String
   props      Json     @default("{}")
   ts         DateTime // event time

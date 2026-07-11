@@ -10,13 +10,15 @@
 import { QueuedEventSchema, type QueuedEvent } from "@pulse/shared";
 import type { EventStream } from "@pulse/stream";
 import { enrich } from "./enrich";
-import type { EventStore } from "./store";
+import type { EventStore, StorableEvent } from "./store";
 import type { DeadLetterQueue } from "./dlq";
+import type { IdentityResolver } from "./identity";
 
 export interface WorkerDeps {
   stream: EventStream<QueuedEvent>;
   store: EventStore;
   dlq: DeadLetterQueue;
+  resolver: IdentityResolver;
   group: string;
   batchSize: number;
 }
@@ -28,9 +30,9 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
       : await deps.stream.readPending(deps.group, deps.batchSize);
   if (entries.length === 0) return 0;
 
-  // Validate + enrich each event. A poison entry (fails the shape check) is dead-lettered and acked, so it can
-  // never wedge the group behind it. Good events are enriched and go to the batch insert.
-  const good: QueuedEvent[] = [];
+  // Validate → resolve person (write-path identity) → enrich → batch insert. A poison entry (fails the shape
+  // check) is dead-lettered and acked, so it can never wedge the group behind it.
+  const good: StorableEvent[] = [];
   const ackIds: string[] = [];
   for (const entry of entries) {
     const parsed = QueuedEventSchema.safeParse(entry.data);
@@ -39,7 +41,9 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
       ackIds.push(entry.id); // poison is durably in the DLQ now — ack so it isn't redelivered
       continue;
     }
-    good.push(enrich(parsed.data));
+    const enriched = enrich(parsed.data);
+    const personId = await deps.resolver.resolve(enriched.projectId, enriched.distinctId);
+    good.push({ ...enriched, personId });
     ackIds.push(entry.id);
   }
   if (good.length > 0) await deps.store.insertBatch(good);
