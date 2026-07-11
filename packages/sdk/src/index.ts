@@ -16,6 +16,15 @@ export function capture(name: string, props?: Record<string, unknown>): void {
   instance.capture(name, props);
 }
 
+export function identify(distinctId: string): void {
+  instance.identify(distinctId);
+}
+
+export function reset(): void {
+  instance.reset();
+}
+
 export type { EventEnvelope, PulseOptions } from "./types";
 export { Pulse } from "./pulse";
-export { uuid } from "./id";
+export { uuid, loadOrCreateDistinctId } from "./id";
+export { browserStorage, memoryStorage, type SafeStorage } from "./storage";
