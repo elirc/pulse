@@ -1,10 +1,9 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import { ZodError } from "zod";
-import { prisma } from "@pulse/db";
+import { prisma, PrismaKeyStore } from "@pulse/db";
 import { CachedKeyResolver } from "@pulse/auth";
 import { EventInputSchema, eventTime } from "@pulse/shared";
-import { PrismaKeyStore } from "./keystore";
 import { env } from "./env";
 
 /**

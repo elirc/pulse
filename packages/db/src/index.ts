@@ -7,3 +7,4 @@ if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 export { Prisma, ApiKeyType } from "@prisma/client";
 export type { Event, Org, User, Membership, Project, ApiKey } from "@prisma/client";
+export { PrismaKeyStore } from "./keystore";

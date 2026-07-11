@@ -1,11 +1,18 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import { z, ZodError } from "zod";
-import { prisma } from "@pulse/db";
+import { prisma, PrismaKeyStore } from "@pulse/db";
+import { CachedKeyResolver } from "@pulse/auth";
 import type { DailyCount } from "@pulse/shared";
 import { env } from "./env";
 import { requireSession } from "./auth";
+import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
+
+export interface ApiServerOptions {
+  /** Injectable so CI resolves keys against an in-memory store; production defaults to Prisma. */
+  resolver?: CachedKeyResolver;
+}
 
 const IssueKeyBody = z.object({
   type: z.enum(["WRITE", "SECRET"]),
@@ -17,9 +24,11 @@ const IssueKeyBody = z.object({
  * insight queries live here; they can be slow and heavy without ever touching the ingest hot path. In S01 the
  * only insight is a daily count — the first, simplest aggregation over the event firehose.
  */
-export function buildApiServer(): FastifyInstance {
+export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   const app = Fastify({ logger: process.env.NODE_ENV === "production" ? { level: "info" } : false });
   void app.register(cors, { origin: env.WEB_URL });
+
+  const resolver = opts.resolver ?? new CachedKeyResolver(new PrismaKeyStore());
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) {
@@ -68,6 +77,31 @@ export function buildApiServer(): FastifyInstance {
       return listKeys(req.params.projectId);
     },
   );
+
+  /**
+   * Read a project's recent events (S02). Authenticated by an API key.
+   *
+   * [fix-later-in-PR] This accepts ANY valid key. Resolving a key proves it is real; it does not prove it is
+   * allowed to READ. A WRITE key lives in public page source, so this lets a stranger who view-sourced the page
+   * read the project's event stream. The privilege-confusion test (next commit) makes that concrete, and the
+   * capability guard after it fixes it.
+   */
+  app.get<{ Params: { projectId: string } }>("/projects/:projectId/events", async (req, reply) => {
+    const resolved = await resolveKey(req, resolver);
+    if (!resolved) {
+      return reply.code(401).send({ error: { code: "UNAUTHENTICATED", message: "API key required" } });
+    }
+    if (resolved.projectId !== req.params.projectId) {
+      return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Key does not match project" } });
+    }
+    const events = await prisma.event.findMany({
+      where: { projectId: resolved.projectId },
+      orderBy: { ts: "desc" },
+      take: 100,
+      select: { id: true, name: true, distinctId: true, ts: true, ingestedAt: true },
+    });
+    return events;
+  });
 
   /**
    * Daily event counts for the last 30 days — one GROUP BY over the naive events table. This is the query S07

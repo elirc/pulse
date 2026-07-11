@@ -15,6 +15,7 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@pulse/auth": "workspace:*",
     "@pulse/shared": "workspace:*",
     "@prisma/client": "^5.22.0"
   },
