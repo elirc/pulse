@@ -6,6 +6,7 @@ import type { EventEnvelope, PulseOptions } from "./types";
 import { loadOrCreateDistinctId, uuid, DISTINCT_ID_KEY } from "./id";
 import { browserStorage, type SafeStorage } from "./storage";
 import { BatchTransport, httpSend, beaconSend, withRetry, type Transport } from "./transport";
+import { installAutoPageview } from "./pageview";
 
 const DEFAULT_HOST = "https://ingest.pulse.example";
 
@@ -18,6 +19,7 @@ export class Pulse {
   private transport: Transport | null = null;
   private storage: SafeStorage = browserStorage();
   private distinctId = "";
+  private teardownPageview: (() => void) | null = null;
   /** Host-supplied sink for the SDK's own errors, used by the never-throw boundary in index.ts. */
   onError: ((error: unknown) => void) | undefined;
 
@@ -40,6 +42,16 @@ export class Pulse {
       });
     this.distinctId = loadOrCreateDistinctId(this.storage);
     this.installLifecycleFlush();
+
+    if (options.autocapturePageviews !== false) {
+      this.teardownPageview = installAutoPageview(() => this.capture("$pageview", this.pageProps()));
+      this.capture("$pageview", this.pageProps()); // the initial load
+    }
+  }
+
+  private pageProps(): Record<string, unknown> {
+    if (typeof location === "undefined") return {};
+    return { path: location.pathname, url: location.href };
   }
 
   /** The visibility/unload flush trigger: flush when the tab is hidden or closing. The unload path upgrades to
@@ -85,5 +97,12 @@ export class Pulse {
   /** Current distinct id (mostly for tests/debugging). */
   getDistinctId(): string {
     return this.distinctId;
+  }
+
+  /** Teardown: restore history, stop the flush timer. Leave the host page as we found it. */
+  shutdown(): void {
+    this.teardownPageview?.();
+    this.teardownPageview = null;
+    this.transport?.stop();
   }
 }

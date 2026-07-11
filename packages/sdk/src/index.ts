@@ -30,6 +30,7 @@ export function reset(): void {
 export type { EventEnvelope, PulseOptions } from "./types";
 export { Pulse } from "./pulse";
 export { guard } from "./guard";
+export { installAutoPageview } from "./pageview";
 export { uuid, loadOrCreateDistinctId } from "./id";
 export { browserStorage, memoryStorage, type SafeStorage } from "./storage";
 export {
