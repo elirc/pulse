@@ -15,6 +15,7 @@
     "@fastify/cors": "^10.0.1",
     "@pulse/auth": "workspace:*",
     "@pulse/db": "workspace:*",
+    "@pulse/insights": "workspace:*",
     "@pulse/shared": "workspace:*",
     "@pulse/stream": "workspace:*",
     "fastify": "^5.1.0",
