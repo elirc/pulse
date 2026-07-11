@@ -3,13 +3,14 @@ import { apiGet } from "./lib/api";
 import { Setup } from "./Setup";
 import { Docs } from "./Docs";
 import { Insights } from "./Insights";
+import { Live } from "./Live";
 
 interface DailyCount {
   day: string;
   count: number;
 }
 
-type View = "insights" | "trends" | "setup" | "docs";
+type View = "insights" | "trends" | "live" | "setup" | "docs";
 
 /**
  * The analyst shell (S01). One insight — a daily-count line chart over the event firehose — rendered from
@@ -59,10 +60,12 @@ export function App(): JSX.Element {
       <nav style={{ display: "flex", gap: 16, borderBottom: "1px solid #232a32", marginBottom: 24 }}>
         {tab("insights", "Events per day")}
         {tab("trends", "Insights")}
+        {tab("live", "Live")}
         {tab("setup", "Setup")}
         {tab("docs", "SDK Docs")}
       </nav>
       {view === "trends" && <Insights />}
+      {view === "live" && <Live />}
       {view === "docs" && <Docs />}
       {view === "setup" && <Setup />}
       {view === "insights" && (

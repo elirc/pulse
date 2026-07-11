@@ -183,6 +183,22 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   });
 
   /**
+   * Live events feed (S05): the latest 100 events for a project, newest first, for the "is it working?" view.
+   * Ordered by server receive time so events show up in arrival order.
+   */
+  app.get<{ Querystring: { projectId?: string } }>("/events/live", async (req) => {
+    const projectId = req.query.projectId ?? "demo-project";
+    type LiveRow = { id: string; name: string; distinctId: string; ts: string };
+    const rows = await prisma.$queryRaw<LiveRow[]>`
+      SELECT "id", "name", "distinctId", to_char("ts", 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ts
+      FROM "Event"
+      WHERE "projectId" = ${projectId}
+      ORDER BY "ingestedAt" DESC
+      LIMIT 100`;
+    return rows;
+  });
+
+  /**
    * Daily event counts for the last 30 days — one GROUP BY over the naive events table. This is the query S07
    * will time at scale: fine at thousands of rows, a full-table scan pain at hundreds of millions. ADR-0002's
    * exit criteria are about exactly this shape of query.
