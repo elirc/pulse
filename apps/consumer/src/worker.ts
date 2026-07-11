@@ -23,6 +23,11 @@ export interface WorkerDeps {
   batchSize: number;
 }
 
+/** Narrow an unknown props value to a plain record (property directives), or undefined. */
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
 async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<number> {
   const entries =
     mode === "new"
@@ -48,6 +53,10 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
       await deps.resolver.identify(enriched.projectId, enriched.props.$anon_distinct_id, enriched.distinctId);
     }
     const personId = await deps.resolver.resolve(enriched.projectId, enriched.distinctId);
+    // Apply person-property directives ($set / $set_once) carried on the event.
+    const set = asRecord(enriched.props.$set);
+    const setOnce = asRecord(enriched.props.$set_once);
+    if (set || setOnce) await deps.resolver.setProperties(personId, set ?? {}, setOnce ?? {});
     good.push({ ...enriched, personId });
     ackIds.push(entry.id);
   }

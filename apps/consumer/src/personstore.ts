@@ -54,6 +54,15 @@ export class InMemoryPersonStore implements PersonStore {
     this.persons.delete(personId);
     return Promise.resolve();
   }
+
+  setProperties(personId: string, set: Record<string, unknown>, setOnce: Record<string, unknown>): Promise<void> {
+    const p = this.persons.get(personId);
+    if (p) {
+      for (const [k, v] of Object.entries(setOnce)) if (!(k in p.properties)) p.properties[k] = v; // first-touch
+      for (const [k, v] of Object.entries(set)) p.properties[k] = v; // last-write-wins
+    }
+    return Promise.resolve();
+  }
 }
 
 type Db = typeof prisma;
@@ -105,5 +114,13 @@ export class PrismaPersonStore implements PersonStore {
 
   async deletePerson(personId: string): Promise<void> {
     await this.db.person.delete({ where: { id: personId } });
+  }
+
+  async setProperties(personId: string, set: Record<string, unknown>, setOnce: Record<string, unknown>): Promise<void> {
+    const row = await this.db.person.findUnique({ where: { id: personId }, select: { properties: true } });
+    const current = { ...(row?.properties as object) } as Record<string, unknown>;
+    for (const [k, v] of Object.entries(setOnce)) if (!(k in current)) current[k] = v; // first-touch
+    for (const [k, v] of Object.entries(set)) current[k] = v; // last-write-wins
+    await this.db.person.update({ where: { id: personId }, data: { properties: current as object } });
   }
 }

@@ -23,6 +23,8 @@ export interface PersonStore {
   foldProperties(winnerId: string, loserId: string): Promise<void>;
   /** Delete a person (after its mappings + properties have been folded away). */
   deletePerson(personId: string): Promise<void>;
+  /** Apply $set (last-write-wins) and $set_once (first-touch, never overwritten) to a person. */
+  setProperties(personId: string, set: Record<string, unknown>, setOnce: Record<string, unknown>): Promise<void>;
 }
 
 import { InMemoryLocker, type Locker } from "./locker";
@@ -114,6 +116,16 @@ export class IdentityResolver {
       for (const distinctId of moved) this.prime(projectId, distinctId, winner);
       return winner;
     });
+  }
+
+  /**
+   * Apply person-property directives from an event. $set is last-write-wins; $set_once is first-touch and never
+   * overwritten (this is where first-touch attribution — utm_source, initial_referrer — lives or dies). Under
+   * redelivery this stays correct because dedupe happens at the insert, and re-applying $set is idempotent while
+   * $set_once is already-set; ordering follows the consumer's processing order, which tracks ingest order.
+   */
+  setProperties(personId: string, set: Record<string, unknown>, setOnce: Record<string, unknown>): Promise<void> {
+    return this.store.setProperties(personId, set, setOnce);
   }
 
   /** Drop a cache entry (used after a merge remaps a distinctId to a different person). */
