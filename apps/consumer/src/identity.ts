@@ -25,9 +25,12 @@ export interface PersonStore {
   deletePerson(personId: string): Promise<void>;
 }
 
+import { InMemoryLocker, type Locker } from "./locker";
+
 export interface ResolverOptions {
   ttlMs?: number;
   now?: () => number;
+  locker?: Locker;
 }
 
 interface CacheEntry {
@@ -39,6 +42,7 @@ export class IdentityResolver {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly ttlMs: number;
   private readonly now: () => number;
+  private readonly locker: Locker;
 
   constructor(
     protected readonly store: PersonStore,
@@ -46,22 +50,37 @@ export class IdentityResolver {
   ) {
     this.ttlMs = opts.ttlMs ?? 60_000;
     this.now = opts.now ?? Date.now;
+    this.locker = opts.locker ?? new InMemoryLocker();
   }
 
   private cacheKey(projectId: string, distinctId: string): string {
     return `${projectId}:${distinctId}`;
   }
 
-  /** Resolve a distinctId to its personId, creating the Person on first sight. */
+  /**
+   * Resolve a distinctId to its personId, creating the Person on first sight. The common paths (cache hit, or a
+   * mapping that already exists) take NO lock — the lock is paid only when a create is actually needed, and then
+   * with a re-check inside it (double-checked locking) so two concurrent first-sights of the same id produce ONE
+   * person, not two.
+   */
   async resolve(projectId: string, distinctId: string): Promise<string> {
     const key = this.cacheKey(projectId, distinctId);
     const hit = this.cache.get(key);
     if (hit && hit.expiresAt > this.now()) return hit.personId;
 
-    let personId = await this.store.findPersonId(projectId, distinctId);
-    personId ??= await this.store.createPersonWithMapping(projectId, distinctId);
-    this.cache.set(key, { personId, expiresAt: this.now() + this.ttlMs });
-    return personId;
+    const existing = await this.store.findPersonId(projectId, distinctId);
+    if (existing) {
+      this.cache.set(key, { personId: existing, expiresAt: this.now() + this.ttlMs });
+      return existing;
+    }
+
+    return this.locker.withLock(`create:${key}`, async () => {
+      // Re-check under the lock: a concurrent resolve may have created it while we waited.
+      const again = await this.store.findPersonId(projectId, distinctId);
+      const personId = again ?? (await this.store.createPersonWithMapping(projectId, distinctId));
+      this.cache.set(key, { personId, expiresAt: this.now() + this.ttlMs });
+      return personId;
+    });
   }
 
   /**
@@ -71,26 +90,30 @@ export class IdentityResolver {
    * events for either id resolve to the winner. The cache is re-primed for every moved id, or those events
    * would mis-attribute to the deleted person for the TTL window.
    *
-   * NOTE (S06): this is the NAIVE version — no lock. Two concurrent identifies for the same user can each create
-   * a person and tangle the merge. The race is demonstrated and fixed in the next two commits.
+   * The whole merge runs under a lock keyed on the USER id (a different namespace from the create lock, so the
+   * inner resolve() calls don't deadlock). That serializes concurrent identifies for the same user — the race
+   * that otherwise splits one user into two persons — and the deterministic oldest-wins winner makes a repeated
+   * identify idempotent (same winner every time).
    */
-  async identify(projectId: string, anonDistinctId: string, userDistinctId: string): Promise<string> {
-    const anonPerson = await this.resolve(projectId, anonDistinctId);
-    const userPerson = await this.resolve(projectId, userDistinctId);
-    if (anonPerson === userPerson) return userPerson;
+  identify(projectId: string, anonDistinctId: string, userDistinctId: string): Promise<string> {
+    return this.locker.withLock(`identify:${projectId}:${userDistinctId}`, async () => {
+      const anonPerson = await this.resolve(projectId, anonDistinctId);
+      const userPerson = await this.resolve(projectId, userDistinctId);
+      if (anonPerson === userPerson) return userPerson;
 
-    const [anonOrder, userOrder] = await Promise.all([
-      this.store.createdOrder(anonPerson),
-      this.store.createdOrder(userPerson),
-    ]);
-    const winner = anonOrder <= userOrder ? anonPerson : userPerson;
-    const loser = winner === anonPerson ? userPerson : anonPerson;
+      const [anonOrder, userOrder] = await Promise.all([
+        this.store.createdOrder(anonPerson),
+        this.store.createdOrder(userPerson),
+      ]);
+      const winner = anonOrder <= userOrder ? anonPerson : userPerson;
+      const loser = winner === anonPerson ? userPerson : anonPerson;
 
-    const moved = await this.store.remapMappings(projectId, loser, winner);
-    await this.store.foldProperties(winner, loser);
-    await this.store.deletePerson(loser);
-    for (const distinctId of moved) this.prime(projectId, distinctId, winner);
-    return winner;
+      const moved = await this.store.remapMappings(projectId, loser, winner);
+      await this.store.foldProperties(winner, loser);
+      await this.store.deletePerson(loser);
+      for (const distinctId of moved) this.prime(projectId, distinctId, winner);
+      return winner;
+    });
   }
 
   /** Drop a cache entry (used after a merge remaps a distinctId to a different person). */
