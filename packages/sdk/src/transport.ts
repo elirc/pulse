@@ -59,6 +59,35 @@ export function beaconSend(apiHost: string, writeKey: string): BeaconFn {
   };
 }
 
+export interface RetryConfig {
+  /** Base delay, ms. Default 1000. */
+  baseMs?: number;
+  /** Give up after this many retries. Default 10. */
+  maxAttempts?: number;
+  /** Timer seam (injectable for fake-timer tests). */
+  schedule?: (fn: () => void, ms: number) => void;
+}
+
+/**
+ * Wrap a sender so a failed batch (5xx or network error) is retried with exponential backoff — wait twice as
+ * long after each failure, so we don't hammer a backend that's already struggling. Succeeds as soon as any
+ * attempt returns ok; gives up after `maxAttempts`.
+ */
+export function withRetry(send: SendFn, cfg: RetryConfig = {}): SendFn {
+  const baseMs = cfg.baseMs ?? 1000;
+  const maxAttempts = cfg.maxAttempts ?? 10;
+  const schedule = cfg.schedule ?? ((fn, ms) => void setTimeout(fn, ms));
+  const attempt = (batch: EventEnvelope[], n: number): Promise<boolean> =>
+    send(batch)
+      .catch(() => false)
+      .then((ok) => {
+        if (ok || n >= maxAttempts) return ok;
+        const delay = baseMs * 2 ** n; // back off further each time
+        return new Promise<boolean>((resolve) => schedule(() => resolve(attempt(batch, n + 1)), delay));
+      });
+  return (batch) => attempt(batch, 0);
+}
+
 export interface BatchTransportConfig {
   send: SendFn;
   /** Synchronous unload sender (sendBeacon). Optional; falls back to `send` (keepalive) when absent/refused. */

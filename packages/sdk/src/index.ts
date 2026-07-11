@@ -33,7 +33,9 @@ export {
   ImmediateTransport,
   httpSend,
   beaconSend,
+  withRetry,
   type Transport,
   type SendFn,
   type BeaconFn,
+  type RetryConfig,
 } from "./transport";

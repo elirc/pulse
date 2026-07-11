@@ -5,7 +5,7 @@
 import type { EventEnvelope, PulseOptions } from "./types";
 import { loadOrCreateDistinctId, uuid, DISTINCT_ID_KEY } from "./id";
 import { browserStorage, type SafeStorage } from "./storage";
-import { BatchTransport, httpSend, beaconSend, type Transport } from "./transport";
+import { BatchTransport, httpSend, beaconSend, withRetry, type Transport } from "./transport";
 
 const DEFAULT_HOST = "https://ingest.pulse.example";
 
@@ -28,7 +28,7 @@ export class Pulse {
     this.transport =
       this.deps.transport ??
       new BatchTransport({
-        send: httpSend(host, options.writeKey),
+        send: withRetry(httpSend(host, options.writeKey)),
         beacon: beaconSend(host, options.writeKey),
         flushAt: options.flushAt,
         flushIntervalMs: options.flushIntervalMs,
