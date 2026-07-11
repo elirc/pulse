@@ -9,6 +9,7 @@
  */
 import type { QueuedEvent } from "@pulse/shared";
 import type { EventStream } from "@pulse/stream";
+import { enrich } from "./enrich";
 import type { EventStore } from "./store";
 
 export interface WorkerDeps {
@@ -25,7 +26,11 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
       : await deps.stream.readPending(deps.group, deps.batchSize);
   if (entries.length === 0) return 0;
 
-  const events = entries.map((e) => e.data);
+  // Enrich each event (UA parse + geo) before it is stored.
+  const events: QueuedEvent[] = [];
+  for (const entry of entries) {
+    events.push(enrich(entry.data));
+  }
   await deps.store.insertBatch(events);
   await deps.stream.ack(
     deps.group,
