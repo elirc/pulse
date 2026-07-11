@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Sprint playbooks
+    url: https://github.com/elirc/folio/tree/main/docs/sprints
+    about: The 15-sprint curriculum. Each sprint is one PR — start at docs/sprints/README.md.
+  - name: Learner guide
+    url: https://github.com/elirc/folio/blob/main/docs/LEARNER-GUIDE.md
+    about: How to study this repo (predict-before-reading, review-before-reveal, labs).

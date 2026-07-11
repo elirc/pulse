@@ -1,0 +1,46 @@
+name: CI
+
+# Pulse CI. Tests run WITHOUT live infra: no Postgres, no Redis, no ClickHouse. Pure cores + in-memory
+# fakes; DB/queue/stream wiring is verified via typecheck + build. The traffic generator + k6 measurements
+# run locally/in labs and are reported in PR bodies — perf claims never gate on a shared CI runner's noise.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_code: ${{ steps.check.outputs.has_code }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f package.json ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_code=false (docs-only repo; skipping build jobs)"
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  verify:
+    needs: detect
+    if: needs.detect.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run lint
+      - run: pnpm turbo run typecheck test build
+      - run: pnpm turbo run budget       # S03+ SDK bundle-size budget (<6KB gz), enforced in CI
