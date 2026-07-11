@@ -3,7 +3,7 @@ import cors from "@fastify/cors";
 import { z, ZodError } from "zod";
 import { prisma, PrismaKeyStore } from "@pulse/db";
 import { CachedKeyResolver, keyCan } from "@pulse/auth";
-import { TrendSpecSchema, compileTrendSql } from "@pulse/insights";
+import { TrendSpecSchema, compileTrendSql, foldTopNRows, type FlatRow } from "@pulse/insights";
 import type { DailyCount } from "@pulse/shared";
 import { env } from "./env";
 import { requireSession } from "./auth";
@@ -151,7 +151,9 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     const body = TrendBody.parse(req.body);
     const { text, params } = compileTrendSql(body.spec, body.projectId);
     const rows = await prisma.$queryRawUnsafe<TrendRow[]>(text, ...params);
-    return rows.map((r) => ({ bucket: r.bucket, label: r.label ?? null, value: Number(r.value) }));
+    const flat: FlatRow[] = rows.map((r) => ({ bucket: r.bucket, label: r.label ?? null, value: Number(r.value) }));
+    // Breakdowns fold the long tail into "Other" so a high-cardinality property can't return thousands of series.
+    return body.spec.breakdown ? foldTopNRows(flat, body.spec.topN) : flat;
   });
 
   /**
