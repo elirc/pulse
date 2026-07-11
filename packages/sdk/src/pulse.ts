@@ -5,7 +5,7 @@
 import type { EventEnvelope, PulseOptions } from "./types";
 import { loadOrCreateDistinctId, uuid, DISTINCT_ID_KEY } from "./id";
 import { browserStorage, type SafeStorage } from "./storage";
-import { ImmediateTransport, httpSend, type Transport } from "./transport";
+import { BatchTransport, httpSend, type Transport } from "./transport";
 
 const DEFAULT_HOST = "https://ingest.pulse.example";
 
@@ -25,8 +25,26 @@ export class Pulse {
 
   init(options: PulseOptions): void {
     const host = options.apiHost ?? DEFAULT_HOST;
-    this.transport = this.deps.transport ?? new ImmediateTransport(httpSend(host, options.writeKey));
+    this.transport =
+      this.deps.transport ??
+      new BatchTransport({
+        send: httpSend(host, options.writeKey),
+        flushAt: options.flushAt,
+        flushIntervalMs: options.flushIntervalMs,
+      });
     this.distinctId = loadOrCreateDistinctId(this.storage);
+    this.installLifecycleFlush();
+  }
+
+  /** The visibility/unload flush trigger: flush when the tab is hidden or closing. The unload path upgrades to
+   *  sendBeacon in the next commit; here it's a best-effort flush so the last batch isn't stranded. */
+  private installLifecycleFlush(): void {
+    if (typeof document === "undefined") return; // non-DOM host (tests without jsdom, SSR)
+    const flush = (): void => this.transport?.flush();
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flush();
+    });
+    globalThis.addEventListener?.("pagehide", flush);
   }
 
   capture(name: string, props: Record<string, unknown> = {}): void {

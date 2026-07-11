@@ -28,3 +28,4 @@ export type { EventEnvelope, PulseOptions } from "./types";
 export { Pulse } from "./pulse";
 export { uuid, loadOrCreateDistinctId } from "./id";
 export { browserStorage, memoryStorage, type SafeStorage } from "./storage";
+export { BatchTransport, ImmediateTransport, httpSend, type Transport, type SendFn } from "./transport";
