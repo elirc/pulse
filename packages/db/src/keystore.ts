@@ -17,10 +17,16 @@ export class PrismaKeyStore implements KeyStore {
   async findByHash(hash: string): Promise<ResolvedKey | null> {
     const row = await this.db.apiKey.findUnique({
       where: { hash },
-      select: { id: true, projectId: true, type: true, revokedAt: true },
+      select: { id: true, projectId: true, type: true, revokedAt: true, allowedOrigins: true },
     });
     if (!row) return null;
-    return { id: row.id, projectId: row.projectId, type: row.type, revokedAt: row.revokedAt };
+    return {
+      id: row.id,
+      projectId: row.projectId,
+      type: row.type,
+      revokedAt: row.revokedAt,
+      allowedOrigins: row.allowedOrigins,
+    };
   }
 
   async touchLastUsed(id: string): Promise<void> {

@@ -19,6 +19,8 @@ export interface ResolvedKey {
   projectId: string;
   type: KeyType;
   revokedAt: Date | null;
+  /** Optional per-key origin allowlist (S02). Absent/empty = any origin. See origin.ts. */
+  allowedOrigins?: string[];
 }
 
 /** The storage port. Production wires a Prisma-backed implementation; tests use {@link InMemoryKeyStore}. */

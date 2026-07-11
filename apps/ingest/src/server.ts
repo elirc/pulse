@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import { ZodError } from "zod";
 import { prisma, PrismaKeyStore } from "@pulse/db";
-import { CachedKeyResolver } from "@pulse/auth";
+import { CachedKeyResolver, originAllowed } from "@pulse/auth";
 import { EventInputSchema, eventTime } from "@pulse/shared";
 import { env } from "./env";
 
@@ -33,7 +33,11 @@ function presentedKey(req: FastifyRequest): string | null {
 
 export function buildIngestServer(opts: IngestServerOptions = {}): FastifyInstance {
   const app = Fastify({ logger: process.env.NODE_ENV === "production" ? { level: "info" } : false });
-  void app.register(cors, { origin: true }); // the SDK posts from arbitrary customer origins
+  // CORS policy #1 (ingest): any origin. An analytics endpoint WANTS cross-origin traffic — customer sites on
+  // every domain post here; that's the product, not a hole. The danger was never CORS, it was what the
+  // credential allows (solved by the write/secret capability split). The app API uses the opposite policy
+  // (same-origin only, origin: env.WEB_URL) because it serves dashboards to our own web app alone.
+  void app.register(cors, { origin: true });
 
   const resolver = opts.resolver ?? new CachedKeyResolver(new PrismaKeyStore(), { ttlMs: 60_000 });
 
@@ -57,6 +61,10 @@ export function buildIngestServer(opts: IngestServerOptions = {}): FastifyInstan
     const resolved = await resolver.resolve(key);
     if (!resolved) {
       return reply.code(401).send({ error: { code: "UNAUTHENTICATED", message: "Invalid write key" } });
+    }
+    // Optional per-key origin allowlist — abuse reduction for browser traffic, off by default (see origin.ts).
+    if (!originAllowed(resolved.allowedOrigins, req.headers.origin ?? null)) {
+      return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Origin not allowed for this key" } });
     }
 
     const input = EventInputSchema.parse(req.body);

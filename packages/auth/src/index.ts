@@ -5,4 +5,5 @@
 export * from "./session";
 export * from "./keys";
 export * from "./capability";
+export * from "./origin";
 export * from "./resolver";

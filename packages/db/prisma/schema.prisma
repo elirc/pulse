@@ -76,6 +76,10 @@ model ApiKey {
   hash       String     @unique // sha256(plaintext); the plaintext is never stored
   prefix     String // e.g. "pw_live_ab12" — identifiable but not secret (support/debug)
   label      String     @default("")
+  // Optional per-key origin allowlist (S02 debate). Empty = allow any origin. Enforced only for
+  // browser-shaped requests (those carrying an Origin header); it is abuse REDUCTION, not security,
+  // because Origin is trivially spoofed outside a browser. See ADR-0003.
+  allowedOrigins String[] @default([])
   lastUsedAt DateTime? // written by SAMPLED update (~1%), never on every event — see resolver
   revokedAt  DateTime?
   createdAt  DateTime   @default(now())
