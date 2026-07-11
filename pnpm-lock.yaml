@@ -41,9 +41,15 @@ importers:
       '@pulse/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@pulse/stream':
+        specifier: workspace:*
+        version: link:../../packages/stream
       fastify:
         specifier: ^5.1.0
         version: 5.10.0
+      ioredis:
+        specifier: ^5.4.1
+        version: 5.11.1
       zod:
         specifier: ^3.23.8
         version: 3.25.76
