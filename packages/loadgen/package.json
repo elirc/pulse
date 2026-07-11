@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "eslint src",
-    "start": "tsx src/run.ts"
+    "start": "tsx src/run.ts",
+    "demo": "tsx src/run-demo.ts"
   },
   "devDependencies": {
     "@pulse/config": "workspace:*",
