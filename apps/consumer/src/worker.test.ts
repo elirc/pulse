@@ -42,4 +42,14 @@ describe("consumer worker — batched insert + ack (S04)", () => {
     expect(store.events).toHaveLength(5);
     expect(await stream.pending(GROUP)).toBe(0);
   });
+
+  it("inserts N-per-batch (multi-row), not one at a time", async () => {
+    const stream = new InMemoryEventStream<QueuedEvent>();
+    const store = new InMemoryEventStore();
+    for (let i = 0; i < 250; i++) await stream.add(qe(`e${i}`));
+
+    await drain({ stream, store, group: GROUP, batchSize: 100 });
+    // 250 events at batchSize 100 → three multi-row inserts, not 250 single inserts.
+    expect(store.batches).toEqual([100, 100, 50]);
+  });
 });

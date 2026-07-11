@@ -17,6 +17,10 @@ export interface EventStore {
 }
 
 export class PrismaEventStore implements EventStore {
+  // Batch size is a throughput/latency dial: a bigger multi-row INSERT amortizes round-trips and index work
+  // (higher throughput) but holds a longer transaction and raises tail latency + memory. The BATCH_SIZE env
+  // (default 200) is the knob; the PR body reports the throughput at a couple of settings. createMany issues a
+  // single multi-row INSERT — the point of this stage over N single inserts.
   async insertBatch(events: QueuedEvent[]): Promise<number> {
     if (events.length === 0) return 0;
     const result = await prisma.event.createMany({
@@ -34,10 +38,13 @@ export class PrismaEventStore implements EventStore {
   }
 }
 
-/** In-memory store for tests — keeps every inserted event so a test can count duplicates. */
+/** In-memory store for tests — keeps every inserted event, and records each batch's size so a test can prove
+ *  events really are inserted N-per-write rather than one at a time. */
 export class InMemoryEventStore implements EventStore {
   public readonly events: QueuedEvent[] = [];
+  public readonly batches: number[] = [];
   insertBatch(events: QueuedEvent[]): Promise<number> {
+    this.batches.push(events.length);
     this.events.push(...events);
     return Promise.resolve(events.length);
   }
