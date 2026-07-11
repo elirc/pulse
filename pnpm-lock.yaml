@@ -67,6 +67,43 @@ importers:
         specifier: ^2.1.4
         version: 2.1.9(@types/node@22.20.1)(jsdom@25.0.1)
 
+  apps/consumer:
+    dependencies:
+      '@pulse/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@pulse/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@pulse/stream':
+        specifier: workspace:*
+        version: link:../../packages/stream
+      ioredis:
+        specifier: ^5.4.1
+        version: 5.11.1
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      '@pulse/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@types/node':
+        specifier: ^22.7.9
+        version: 22.20.1
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.17)(tsx@4.23.0)(typescript@5.9.3)
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.0
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@22.20.1)(jsdom@25.0.1)
+
   apps/ingest:
     dependencies:
       '@fastify/cors':
