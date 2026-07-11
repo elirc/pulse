@@ -25,6 +25,10 @@ const BatchSchema = z.array(EventInputSchema).min(1).max(MAX_BATCH);
 export interface IngestServerOptions {
   resolver?: CachedKeyResolver;
   stream: StreamProducer<QueuedEvent>;
+  /** Backpressure watermark: shed with 429 when the stream backlog exceeds this. Default from env. */
+  maxDepth?: number;
+  /** How often (ms) to re-sample stream depth. Default 1000; tests set 0 to sample every request. */
+  depthSampleMs?: number;
 }
 
 /** Extract the presented write key: `Authorization: Bearer <key>`, or a `?k=` query param for pixel/no-header
@@ -46,6 +50,23 @@ export function buildIngestServer(opts: IngestServerOptions): FastifyInstance {
 
   const resolver = opts.resolver ?? new CachedKeyResolver(new PrismaKeyStore(), { ttlMs: 60_000 });
   const stream = opts.stream;
+  const maxDepth = opts.maxDepth ?? env.INGEST_MAX_DEPTH;
+
+  // Backpressure: shed load at the EDGE (the cheapest place to say no) when the consumer falls behind and the
+  // stream backlog grows past the watermark. The alternative — accept everything — is an out-of-memory consumer
+  // and a stream that never drains. We don't call XLEN per request (that would tax the hot path); we sample the
+  // depth at most once a second and reuse it. The SDK treats a 429 as retryable and backs off.
+  const depthSampleMs = opts.depthSampleMs ?? 1000;
+  let cachedDepth = 0;
+  let depthCheckedAt = -Infinity;
+  const overWatermark = async (): Promise<boolean> => {
+    const now = Date.now();
+    if (now - depthCheckedAt >= depthSampleMs) {
+      cachedDepth = await stream.depth();
+      depthCheckedAt = now;
+    }
+    return cachedDepth > maxDepth;
+  };
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) {
@@ -69,6 +90,13 @@ export function buildIngestServer(opts: IngestServerOptions): FastifyInstance {
     }
     if (!originAllowed(resolved.allowedOrigins, req.headers.origin ?? null)) {
       return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Origin not allowed for this key" } });
+    }
+    if (await overWatermark()) {
+      // Shed politely: tell the client when to come back rather than dropping silently.
+      return reply
+        .code(429)
+        .header("retry-after", "2")
+        .send({ error: { code: "BACKPRESSURE", message: "Ingest is shedding load; retry shortly" } });
     }
 
     const inputs = Array.isArray(req.body) ? BatchSchema.parse(req.body) : [EventInputSchema.parse(req.body)];
