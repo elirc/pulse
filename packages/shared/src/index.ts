@@ -46,3 +46,23 @@ export interface DailyCount {
   day: string; // YYYY-MM-DD
   count: number;
 }
+
+/** The UTC day key (YYYY-MM-DD) an event falls into, by its event time. */
+export function dayKey(ts: Date): string {
+  return ts.toISOString().slice(0, 10);
+}
+
+/**
+ * Reference daily-count aggregation over events, ascending by day. This is the pure equivalent of the
+ * `GROUP BY date_trunc('day', ts)` SQL the app API runs in production — kept here so the pipeline can be
+ * tested end-to-end without a database, and so S07 has an executable spec of "what the query must return"
+ * to check the ClickHouse version against.
+ */
+export function aggregateDailyCounts(events: Array<{ ts: Date }>): DailyCount[] {
+  const buckets = new Map<string, number>();
+  for (const e of events) {
+    const key = dayKey(e.ts);
+    buckets.set(key, (buckets.get(key) ?? 0) + 1);
+  }
+  return [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, count]) => ({ day, count }));
+}

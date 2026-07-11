@@ -1,9 +1,10 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import { ZodError } from "zod";
-import { prisma, PrismaKeyStore } from "@pulse/db";
+import { PrismaKeyStore } from "@pulse/db";
 import { CachedKeyResolver, originAllowed } from "@pulse/auth";
 import { EventInputSchema, eventTime } from "@pulse/shared";
+import { PrismaEventSink, type EventSink } from "./eventsink";
 import { env } from "./env";
 
 /**
@@ -20,6 +21,7 @@ import { env } from "./env";
  */
 export interface IngestServerOptions {
   resolver?: CachedKeyResolver;
+  sink?: EventSink;
 }
 
 /** Extract the presented write key: `Authorization: Bearer <key>`, or a `?k=` query param for pixel/no-header
@@ -40,6 +42,7 @@ export function buildIngestServer(opts: IngestServerOptions = {}): FastifyInstan
   void app.register(cors, { origin: true });
 
   const resolver = opts.resolver ?? new CachedKeyResolver(new PrismaKeyStore(), { ttlMs: 60_000 });
+  const sink = opts.sink ?? new PrismaEventSink();
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) {
@@ -68,14 +71,12 @@ export function buildIngestServer(opts: IngestServerOptions = {}): FastifyInstan
     }
 
     const input = EventInputSchema.parse(req.body);
-    await prisma.event.create({
-      data: {
-        projectId: resolved.projectId,
-        distinctId: input.distinctId,
-        name: input.name,
-        props: input.props as object,
-        ts: eventTime(input.ts), // client clock trusted in S02 (a flaw revisited S04/S13)
-      },
+    await sink.append({
+      projectId: resolved.projectId,
+      distinctId: input.distinctId,
+      name: input.name,
+      props: input.props,
+      ts: eventTime(input.ts), // client clock trusted in S02 (a flaw revisited S04/S13)
     });
     // 200 with a tiny body — the SDK is fire-and-forget.
     return reply.code(200).send({ ok: true });
