@@ -11,6 +11,7 @@ import { PrismaAdvisoryLocker } from "./locker";
 import { Sessionizer, RedisSessionStore, type RedisKV } from "./session";
 import { BufferedColumnStore, ClickHouseColumnStore, type ClickHouseLike, type ColumnStore } from "./columnstore";
 import { processNewBatch, processPendingBatch } from "./worker";
+import { GracefulShutdown, runConsumerLoop } from "./shutdown";
 import { env } from "./env";
 
 // The process entry (not exercised in CI): wire Redis + Prisma and loop forever, draining pending work first.
@@ -47,12 +48,24 @@ async function main(): Promise<void> {
   await stream.ensureGroup(env.CONSUMER_GROUP);
   console.log(`pulse consumer '${env.CONSUMER_NAME}' on group '${env.CONSUMER_GROUP}'`);
 
-  // Recover this consumer's un-acked backlog from a prior crash, then poll new work.
+  // Graceful shutdown (S15): SIGTERM (from the orchestrator on deploy) → drain. The loop finishes its in-flight
+  // batch and XACKs it, then exits cleanly, so a rollover doesn't strand a pending list for the next consumer.
+  const shutdown = new GracefulShutdown();
+  const onSignal = (): void => {
+    console.log("shutdown requested — draining in-flight batch, then exiting");
+    shutdown.requestDrain();
+  };
+  process.on("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
+
+  // Recover this consumer's un-acked backlog from a prior crash, then poll new work until drained.
   while ((await processPendingBatch(deps)) > 0);
-  for (;;) {
+  await runConsumerLoop(async () => {
     const n = await processNewBatch(deps);
     if (n === 0) await new Promise((r) => setTimeout(r, 200)); // idle poll
-  }
+    return n;
+  }, shutdown);
+  console.log("consumer drained; exiting for a clean rollover");
 }
 
 main().catch((err) => {
