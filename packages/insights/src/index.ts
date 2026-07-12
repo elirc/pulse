@@ -5,4 +5,5 @@
 export * from "./spec";
 export * from "./compute";
 export * from "./sql";
+export * from "./sql-clickhouse";
 export * from "./pivot";
