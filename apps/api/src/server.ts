@@ -53,7 +53,7 @@ import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
 import { createFlag, listFlags, flagPayload } from "./flags";
 import { createExperiment, listExperiments, setExperimentStatus } from "./experiments";
-import { FlagSpecSchema } from "@pulse/flags";
+import { FlagSpecSchema, computeExperimentResult, type VariantCount } from "@pulse/flags";
 import { createShareToken, resolveShareToken, revokeShareToken } from "./share";
 import { executePersonDeletion, type DeletionPorts } from "./deletion";
 import { TailHub } from "./tail";
@@ -132,6 +132,8 @@ export interface ApiServerOptions {
   readFromClickhouse?: boolean;
   /** GDPR deletion ports (S13) — metadata/CH/cache delete + verify + ledger. Absent → the endpoint 503s. */
   deletionPorts?: DeletionPorts;
+  /** Experiment exposure→goal counts per variant (S14) — from a CH funnel. Absent → the results endpoint 503s. */
+  experimentCounts?: (experimentId: string, projectId: string) => Promise<VariantCount[]>;
 }
 
 const IssueKeyBody = z.object({
@@ -629,6 +631,22 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       const res = await setExperimentStatus(req.params.id, status);
       if ("error" in res) return reply.code(400).send({ error: { code: "BAD_REQUEST", message: res.error } });
       return reply.code(200).send({ ok: true });
+    },
+  );
+
+  /**
+   * Experiment results (S14): conversion per variant from exposure→goal, with a two-proportion z-test and a CI
+   * on the lift. Counts come from a funnel over $flag_evaluated → the goal event (reuses S08). The math is pure
+   * (@pulse/flags); this endpoint just fetches the counts and formats.
+   */
+  app.get<{ Params: { id: string }; Querystring: { projectId?: string } }>(
+    "/experiments/:id/results",
+    async (req, reply) => {
+      if (!opts.experimentCounts) {
+        return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Experiment analysis not wired" } });
+      }
+      const counts = await opts.experimentCounts(req.params.id, req.query.projectId ?? "demo-project");
+      return computeExperimentResult(counts);
     },
   );
 
