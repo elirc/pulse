@@ -68,6 +68,17 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
 
+  jobs:
+    build: { context: ., dockerfile: apps/jobs/Dockerfile }
+    environment:
+      DATABASE_URL: postgres://pulse:pulse@postgres:5432/pulse
+      REDIS_URL: redis://redis:6379
+      CLICKHOUSE_URL: http://clickhouse:8123
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+
   web:
     build: { context: ., dockerfile: apps/web/Dockerfile }
     ports: ["4173:4173"]
