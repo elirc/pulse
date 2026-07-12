@@ -30,6 +30,9 @@ export function canonicalHash(value: unknown): string {
 export interface CacheStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, ttlMs: number): Promise<void>;
+  /** Drop all cached entries (S13). Used by GDPR deletion — a per-person key doesn't exist (tiles are keyed by
+   *  query hash), so erasure flushes the cache wholesale rather than leave a deleted person served until TTL. */
+  clear?(): Promise<void>;
 }
 
 export interface CachedResult<T> {
@@ -100,6 +103,10 @@ export class InMemoryCacheStore implements CacheStore {
   }
   set(key: string, value: string, ttlMs: number): Promise<void> {
     this.map.set(key, { value, expiresAt: this.now() + ttlMs });
+    return Promise.resolve();
+  }
+  clear(): Promise<void> {
+    this.map.clear();
     return Promise.resolve();
   }
 }

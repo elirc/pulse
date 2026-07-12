@@ -139,9 +139,29 @@ model ShareToken {
   hash        String    @unique
   prefix      String
   createdAt   DateTime  @default(now())
+  // S13 (harvests flaw #5): links now expire, and can be revoked. A null expiresAt means "no expiry" (legacy);
+  // new tokens always get one. revokedAt is set by the revoke endpoint — a killed link dies immediately.
+  expiresAt   DateTime?
+  revokedAt   DateTime?
   dashboard   Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
 
   @@index([dashboardId])
+}
+
+// GDPR deletion-request ledger (S13): the compliance evidence trail. One row per erasure request with its
+// outcome — so "we deleted this person" is provable months later, not just asserted. `remaining` must be 0 for
+// a completed request; a non-zero count marks the sweep failed and demands a re-run.
+model DeletionRequest {
+  id          String    @id @default(cuid())
+  personId    String
+  status      String    @default("pending") // pending | completed | failed
+  distinctIds String[]
+  rowsDeleted Int?
+  remaining   Int?
+  requestedAt DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([personId])
 }
 
 // A cohort (S09): a named set of people, defined by ONE AST (property predicate or behavioral: did event X ≥ N

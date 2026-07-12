@@ -23,7 +23,9 @@ import {
 import { resolveCohortMembers } from "./cohorts";
 import { TailHub } from "./tail";
 import { OnlineWindow, RedisSortedSetStore, type RedisZ } from "./online";
-import { ConcurrencyLimiter, type QueuedEvent } from "@pulse/shared";
+import { ConcurrencyLimiter, InMemoryCacheStore, type QueuedEvent } from "@pulse/shared";
+import { prisma } from "@pulse/db";
+import type { DeletionLedgerPort, DeletionPorts, DeletionRequest } from "./deletion";
 
 // Wire ingestion metrics off Redis (not exercised in CI). streamDepth/dlqDepth are XLENs; consumerPending is
 // the group's pending-entries count.
@@ -150,6 +152,89 @@ const onQueryCost = (e: QueryCostEvent): void => {
   );
 };
 
+// GDPR deletion ports (S13). Deletion is a background sweep across every store with a count-to-zero verify.
+// The cache is single-instance in-memory here (also handed to the server) so a person delete can flush it.
+const cacheStore = new InMemoryCacheStore();
+const toReq = (r: {
+  id: string;
+  personId: string;
+  status: string;
+  distinctIds: string[];
+  rowsDeleted: number | null;
+  remaining: number | null;
+  requestedAt: Date;
+  completedAt: Date | null;
+}): DeletionRequest => ({
+  id: r.id,
+  personId: r.personId,
+  status: r.status as DeletionRequest["status"],
+  distinctIds: r.distinctIds,
+  rowsDeleted: r.rowsDeleted ?? undefined,
+  remaining: r.remaining ?? undefined,
+  requestedAt: r.requestedAt.toISOString(),
+  completedAt: r.completedAt?.toISOString(),
+});
+const prismaDeletionLedger: DeletionLedgerPort = {
+  async create(req) {
+    await prisma.deletionRequest.create({
+      data: { id: req.id, personId: req.personId, status: req.status, distinctIds: req.distinctIds, requestedAt: new Date(req.requestedAt) },
+    });
+  },
+  async update(id, patch) {
+    await prisma.deletionRequest.update({
+      where: { id },
+      data: {
+        status: patch.status,
+        rowsDeleted: patch.rowsDeleted,
+        remaining: patch.remaining,
+        completedAt: patch.completedAt ? new Date(patch.completedAt) : undefined,
+      },
+    });
+  },
+  async get(id) {
+    const r = await prisma.deletionRequest.findUnique({ where: { id } });
+    return r ? toReq(r) : null;
+  },
+  async list() {
+    const rs = await prisma.deletionRequest.findMany({ orderBy: { requestedAt: "desc" } });
+    return rs.map(toReq);
+  },
+};
+const deletionPorts: DeletionPorts = {
+  async resolveDistinctIds(personId) {
+    const rows = await prisma.distinctIdMapping.findMany({ where: { personId }, select: { distinctId: true } });
+    return rows.map((r) => r.distinctId);
+  },
+  async deleteMetadata(personId) {
+    // Hard-delete every Postgres copy in one transaction: cohort memberships, id mappings, the person row.
+    await prisma.$transaction([
+      prisma.cohortMembership.deleteMany({ where: { personId } }),
+      prisma.distinctIdMapping.deleteMany({ where: { personId } }),
+      prisma.person.deleteMany({ where: { id: personId } }),
+    ]);
+  },
+  async deleteEvents(distinctIds) {
+    if (distinctIds.length === 0) return 0;
+    // ClickHouse lightweight delete — a background mutation, not a row op. Cheap to issue, async to apply.
+    await ch.command({ query: "DELETE FROM events WHERE distinctId IN {ids:Array(String)}", query_params: { ids: distinctIds } });
+    return distinctIds.length; // best-effort; the verify step is the real proof
+  },
+  async flushCaches() {
+    await cacheStore.clear?.();
+  },
+  async countRemaining(distinctIds) {
+    if (distinctIds.length === 0) return 0;
+    const rs = await ch.query({
+      query: "SELECT count() AS n FROM events WHERE distinctId IN {ids:Array(String)}",
+      query_params: { ids: distinctIds },
+      format: "JSONEachRow",
+    });
+    const rows = (await rs.json()) as Array<{ n: string | number }>;
+    return Number(rows[0]?.n ?? 0);
+  },
+  ledger: prismaDeletionLedger,
+};
+
 const app = buildApiServer({
   ingestOps,
   chTrend,
@@ -162,6 +247,8 @@ const app = buildApiServer({
   onlineWindow,
   queryLimiter,
   onQueryCost,
+  cacheStore,
+  deletionPorts,
   readFromClickhouse: env.READ_FROM_CH,
 });
 app

@@ -51,7 +51,8 @@ import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
-import { createShareToken, resolveShareToken } from "./share";
+import { createShareToken, resolveShareToken, revokeShareToken } from "./share";
+import { executePersonDeletion, type DeletionPorts } from "./deletion";
 import { TailHub } from "./tail";
 import { OnlineWindow } from "./online";
 import { randomUUID } from "node:crypto";
@@ -113,6 +114,8 @@ export interface ApiServerOptions {
   cacheStore?: CacheStore;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
   readFromClickhouse?: boolean;
+  /** GDPR deletion ports (S13) — metadata/CH/cache delete + verify + ledger. Absent → the endpoint 503s. */
+  deletionPorts?: DeletionPorts;
 }
 
 const IssueKeyBody = z.object({
@@ -458,9 +461,56 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     { preHandler: requireSession },
     async (req, reply) => {
       const issued = await createShareToken(req.params.dashboardId);
-      return reply.code(201).send({ token: issued.token, prefix: issued.prefix, warning: "Shown once. Anyone with this link can view the dashboard." });
+      return reply.code(201).send({
+        token: issued.token,
+        prefix: issued.prefix,
+        expiresAt: issued.expiresAt.toISOString(),
+        warning: "Shown once. Anyone with this link can view the dashboard until it expires.",
+      });
     },
   );
+
+  /** Revoke a share token by its public prefix (S13, flaw #5) — a leaked link can be killed immediately. */
+  app.delete<{ Params: { dashboardId: string; prefix: string } }>(
+    "/dashboards/:dashboardId/share/:prefix",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      const revoked = await revokeShareToken(req.params.dashboardId, req.params.prefix);
+      if (revoked === 0) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "No active link with that prefix" } });
+      return reply.code(200).send({ revoked });
+    },
+  );
+
+  /**
+   * GDPR deletion (S13) — the data-subject's right to erasure. Deletion in an append-only store is a background
+   * sweep across EVERY copy (events, metadata, cohorts, caches) with a count-to-zero verification, recorded in a
+   * ledger for compliance evidence. Requires a session (a human, accountable action).
+   */
+  app.post<{ Params: { personId: string } }>(
+    "/gdpr/persons/:personId/delete",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      if (!opts.deletionPorts) {
+        return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Deletion pipeline not wired" } });
+      }
+      const result = await executePersonDeletion(req.params.personId, opts.deletionPorts);
+      // 202: the request is recorded and the sweep has run; a failed verification surfaces in the ledger.
+      return reply.code(202).send(result);
+    },
+  );
+
+  /** Deletion-request ledger (S13) — compliance evidence: prove a deletion happened, months later. */
+  app.get("/gdpr/deletions", { preHandler: requireSession }, async (_req, reply) => {
+    if (!opts.deletionPorts) return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Deletion pipeline not wired" } });
+    return { deletions: await opts.deletionPorts.ledger.list() };
+  });
+
+  app.get<{ Params: { id: string } }>("/gdpr/deletions/:id", { preHandler: requireSession }, async (req, reply) => {
+    if (!opts.deletionPorts) return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Deletion pipeline not wired" } });
+    const row = await opts.deletionPorts.ledger.get(req.params.id);
+    if (!row) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "No such deletion request" } });
+    return row;
+  });
 
   /** A dashboard with its tiles (for rendering). */
   app.get<{ Params: { dashboardId: string } }>("/dashboards/:dashboardId", async (req, reply) => {
@@ -479,7 +529,7 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
    * data-exfiltration API. The boundary is *whose* query runs.
    */
   app.get<{ Params: { token: string } }>("/public/:token", async (req, reply) => {
-    const dashboardId = await resolveShareToken(req.params.token);
+    const dashboardId = await resolveShareToken(req.params.token, req.ip);
     if (!dashboardId) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Invalid share link" } });
     const dash = await prisma.dashboard.findUnique({
       where: { id: dashboardId },
@@ -490,7 +540,7 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
 
   /** A single tile's result on the public path — restricted to insights that belong to THIS dashboard. */
   app.get<{ Params: { token: string; insightId: string } }>("/public/:token/tiles/:insightId", async (req, reply) => {
-    const dashboardId = await resolveShareToken(req.params.token);
+    const dashboardId = await resolveShareToken(req.params.token, req.ip);
     if (!dashboardId) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Invalid share link" } });
     // The insight must be a tile on this dashboard — you can't pass an arbitrary insightId to read other data.
     const tile = await prisma.dashboardTile.findFirst({ where: { dashboardId, insightId: req.params.insightId }, select: { id: true } });

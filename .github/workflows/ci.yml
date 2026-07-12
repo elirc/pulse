@@ -44,3 +44,25 @@ jobs:
       - run: pnpm run lint
       - run: pnpm turbo run typecheck test build
       - run: pnpm turbo run budget       # S03+ SDK bundle-size budget (<6KB gz), enforced in CI
+      - run: pnpm --filter @pulse/consumer exec vitest run src/chaos.test.ts   # S13 pipeline chaos: dup/reorder/skew adversary, named permanent stage
+
+  # S13 supply-chain & secret gates (P3). Runs in parallel with verify; secrets/vuln gates should never wait on
+  # the build. gitleaks scans the diff for committed credentials; the audit fails the build on a high+ advisory.
+  security:
+    needs: detect
+    if: needs.detect.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # gitleaks scans history, not just the tip
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --audit-level=high   # dependency gate: block on high/critical advisories

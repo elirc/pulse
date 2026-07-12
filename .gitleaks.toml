@@ -1,0 +1,19 @@
+# gitleaks config (S13). Extend the default ruleset, then allowlist the FAKE credentials that appear in tests
+# and fixtures — the Pulse key formats (pw_live_…, pst_…) are generated at runtime in tests, never real secrets.
+# The point of the gate is to catch a REAL committed secret, not to trip over deterministic test doubles.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and Pulse's own show-once key formats (never real credentials)"
+paths = [
+  '''.*\.test\.ts$''',
+  '''.*/loadgen/.*''',
+  '''packages/auth/src/.*\.ts$''',   # key gen/hash lives here; sample keys are synthetic
+]
+regexes = [
+  '''pw_(live|test)_[A-Za-z0-9_-]+''',   # write/secret key format, minted in tests
+  '''pst_[A-Za-z0-9_-]+''',              # share-token format, minted in tests
+  '''dev-insecure-session-secret-change-me''', # documented dev default (ADR-0003)
+]

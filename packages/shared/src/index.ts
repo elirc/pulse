@@ -12,6 +12,8 @@ import { z } from "zod";
 export * from "./cache";
 export * from "./hll";
 export * from "./concurrency";
+export * from "./rate-limit";
+export * from "./pii";
 
 /** The event as the SDK sends it over the wire to `POST /e`. `ts` is the client's clock (trusted in S1; a
  *  deliberate flaw the ingest pipeline revisits in S04/S13 — clocks lie). */
@@ -73,6 +75,36 @@ export function eventTime(ts: string | number | undefined, now: () => Date = () 
   if (ts === undefined) return now();
   const d = typeof ts === "number" ? new Date(ts) : new Date(ts);
   return Number.isNaN(d.getTime()) ? now() : d;
+}
+
+/** Maximum trusted clock skew between a client `ts` and server ingest time (S13): ±48h. */
+export const MAX_CLOCK_SKEW_MS = 48 * 60 * 60 * 1000;
+
+export interface ResolvedEventTime {
+  ts: Date;
+  /** True when the client ts was outside the skew window and was pulled to the boundary. */
+  clamped: boolean;
+}
+
+/**
+ * Server-authoritative event time (S13, harvests flaw #3). The client clock is BOTH attacker-controlled (forging
+ * `ts` is trivial) AND innocently wrong (dead batteries, bad NTP) — so we trust-but-clamp. A client ts within
+ * ±MAX_CLOCK_SKEW_MS of server ingest time is kept as-is; anything further out (events "from 2031" or "from
+ * 1970") is clamped to the nearest boundary and flagged so the distortion is visible, not silent. A
+ * missing/invalid ts falls back to server time. `ingestedAt` — server time — is the anchor of trust.
+ */
+export function resolveEventTime(
+  clientTs: string | number | undefined,
+  ingestedAt: Date,
+  maxSkewMs: number = MAX_CLOCK_SKEW_MS,
+): ResolvedEventTime {
+  if (clientTs === undefined) return { ts: ingestedAt, clamped: false };
+  const d = typeof clientTs === "number" ? new Date(clientTs) : new Date(clientTs);
+  if (Number.isNaN(d.getTime())) return { ts: ingestedAt, clamped: false };
+  const skew = d.getTime() - ingestedAt.getTime();
+  if (skew > maxSkewMs) return { ts: new Date(ingestedAt.getTime() + maxSkewMs), clamped: true };
+  if (skew < -maxSkewMs) return { ts: new Date(ingestedAt.getTime() - maxSkewMs), clamped: true };
+  return { ts: d, clamped: false };
 }
 
 /** A daily-count row for the S01 chart: one bucket per day. */
