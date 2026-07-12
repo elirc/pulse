@@ -9,6 +9,10 @@ const EnvSchema = z.object({
   CONSUMER_GROUP: z.string().default("inserters"),
   CONSUMER_NAME: z.string().default("consumer-1"),
   BATCH_SIZE: z.coerce.number().default(200),
+  // S07 migration flags.
+  CLICKHOUSE_URL: z.string().default("http://localhost:8123"),
+  CLICKHOUSE_DB: z.string().default("pulse"),
+  DUAL_WRITE: z.coerce.boolean().default(false), // write PG (truth) + CH (shadow)
 });
 
 export const env = EnvSchema.parse(process.env);

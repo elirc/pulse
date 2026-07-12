@@ -11,6 +11,7 @@ import { QueuedEventSchema, type QueuedEvent } from "@pulse/shared";
 import type { EventStream } from "@pulse/stream";
 import { batchEnrich } from "./enrich";
 import type { EventStore, StorableEvent } from "./store";
+import type { ColumnStore } from "./columnstore";
 import type { DeadLetterQueue } from "./dlq";
 import type { IdentityResolver } from "./identity";
 
@@ -21,6 +22,8 @@ export interface WorkerDeps {
   resolver: IdentityResolver;
   group: string;
   batchSize: number;
+  /** When set (S07 migration), dual-write to the columnar store too. PG stays the source of truth; CH shadows. */
+  columnStore?: ColumnStore;
 }
 
 /** Narrow an unknown props value to a plain record (property directives), or undefined. */
@@ -66,7 +69,18 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
     if (set || setOnce) await deps.resolver.setProperties(personId, set ?? {}, setOnce ?? {});
     good.push({ ...enriched, personId });
   }
-  if (good.length > 0) await deps.store.insertBatch(good);
+  if (good.length > 0) {
+    await deps.store.insertBatch(good); // Postgres — the source of truth
+    // Dual-write shadow to ClickHouse (S07). PG is truth: a CH write failure must NOT fail the batch or block
+    // the ack, or a shadow that isn't authoritative yet could stall the pipeline. Log-and-continue.
+    if (deps.columnStore) {
+      try {
+        await deps.columnStore.insert(good);
+      } catch {
+        /* shadow write failed — reconciliation will catch the gap; do not fail the authoritative path */
+      }
+    }
+  }
   await deps.stream.ack(deps.group, ackIds);
   return entries.length;
 }
