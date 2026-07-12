@@ -4,6 +4,7 @@
  */
 export * from "./spec";
 export * from "./funnel-spec";
+export * from "./funnel-naive";
 export * from "./compute";
 export * from "./sql";
 export * from "./sql-clickhouse";
