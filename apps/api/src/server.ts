@@ -24,6 +24,8 @@ export type EventFetcher = (projectId: string, days: number) => Promise<EventLik
 
 const RetentionBody = zod.object({
   projectId: zod.string().min(1).default("demo-project"),
+  /** Optional cohort filter (S09): restrict retention to this cohort's members. */
+  cohort: zod.string().min(1).optional(),
   spec: zod.object({
     startEvent: zod.string().min(1).max(200).optional(),
     returnEvent: zod.string().min(1).max(200).optional(),
@@ -69,6 +71,8 @@ export interface ApiServerOptions {
   chFunnel?: FunnelRunner;
   /** Event fetcher for retention (S09) — the big scan retention reads, then the grid is computed in-memory. */
   chEvents?: EventFetcher;
+  /** Resolve a cohort's members (S09) — property live / behavioral materialized. Used to filter any query. */
+  cohortMembers?: (cohortId: string, projectId: string) => Promise<Set<string>>;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
   readFromClickhouse?: boolean;
 }
@@ -263,7 +267,12 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       void reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Event source not wired" } });
       return undefined;
     }
-    const events = await opts.chEvents(body.projectId, body.spec.days);
+    let events = await opts.chEvents(body.projectId, body.spec.days);
+    // Cohort filter (S09): the same membership resolver every query path shares.
+    if (body.cohort && opts.cohortMembers) {
+      const members = await opts.cohortMembers(body.cohort, body.projectId);
+      events = events.filter((e) => members.has(e.personId ?? e.distinctId));
+    }
     return computeRetention(events, body.spec);
   });
 

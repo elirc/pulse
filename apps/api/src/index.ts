@@ -3,6 +3,7 @@ import { createClient } from "@clickhouse/client";
 import { RedisEventStream, type RedisLike } from "@pulse/stream";
 import { compileTrendClickhouse, compileFunnelClickhouse, foldTopNRows, type FlatRow, type EventLike } from "@pulse/insights";
 import { buildApiServer, env, type IngestOps, type TrendRunner, type FunnelRunner, type EventFetcher } from "./server";
+import { resolveCohortMembers } from "./cohorts";
 
 // Wire ingestion metrics off Redis (not exercised in CI). streamDepth/dlqDepth are XLENs; consumerPending is
 // the group's pending-entries count.
@@ -66,7 +67,14 @@ const chEvents: EventFetcher = async (projectId, days) => {
   }));
 };
 
-const app = buildApiServer({ ingestOps, chTrend, chFunnel, chEvents, readFromClickhouse: env.READ_FROM_CH });
+const app = buildApiServer({
+  ingestOps,
+  chTrend,
+  chFunnel,
+  chEvents,
+  cohortMembers: resolveCohortMembers,
+  readFromClickhouse: env.READ_FROM_CH,
+});
 app
   .listen({ port: env.API_PORT, host: "0.0.0.0" })
   .then(() => {
