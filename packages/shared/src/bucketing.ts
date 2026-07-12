@@ -16,13 +16,24 @@
 const FNV_OFFSET = 2166136261;
 const FNV_PRIME = 16777619;
 
-/** FNV-1a 32-bit hash of a string → unsigned 32-bit int. */
+/**
+ * FNV-1a 32-bit hash of a string, finished with murmur3's fmix32 avalanche → unsigned 32-bit int. FNV-1a alone
+ * mixes its LOW bits well but its high bits poorly — and the bucket decile is read off the high bits, so raw
+ * FNV-1a produces a visibly non-uniform split. The fmix32 finalizer avalanches all 32 bits, restoring uniformity
+ * (the chi-square property test is exactly what catches the missing finalizer).
+ */
 export function hash32(input: string): number {
   let h = FNV_OFFSET;
   for (let i = 0; i < input.length; i++) {
     h ^= input.charCodeAt(i);
     h = Math.imul(h, FNV_PRIME);
   }
+  // murmur3 fmix32 finalizer
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
   return h >>> 0;
 }
 
