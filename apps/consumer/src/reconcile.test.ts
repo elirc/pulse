@@ -21,10 +21,18 @@ const asRows = (evs: StorableEvent[]): EventRow[] => evs.map((e) => ({ ts: e.ts,
  * The next commit fixes it with an overlap window; dedupe absorbs the overlap.
  */
 describe("reconciliation: PG vs CH (S07)", () => {
-  it("reconciles clean after the migration", () => {
+  it("reconciles clean after the migration (overlap window closes the gap)", () => {
     const backfillUpTo = planBackfillUpTo(BACKFILL_SNAPSHOT, DUAL_WRITE_FROM);
     const ch = clickhouseContents(PG, DUAL_WRITE_FROM, backfillUpTo);
     const result = reconcile(asRows(PG), asRows(ch));
     expect(result.ok).toBe(true);
+    expect(result.countDrift).toEqual([]);
+  });
+
+  it("the overlap region is written by both paths but deduped — no double-count", () => {
+    const backfillUpTo = planBackfillUpTo(BACKFILL_SNAPSHOT, DUAL_WRITE_FROM);
+    const ch = clickhouseContents(PG, DUAL_WRITE_FROM, backfillUpTo);
+    expect(ch).toHaveLength(PG.length); // every event exactly once despite the overlap
+    expect(new Set(ch.map((e) => e.uuid)).size).toBe(PG.length);
   });
 });

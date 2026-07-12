@@ -9,13 +9,18 @@ export function addDays(iso: string, days: number): string {
   return new Date(new Date(iso).getTime() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+/** Days the backfill deliberately overlaps PAST the dual-write start, to absorb boundary skew. Dedupe (uuid)
+ *  makes the overlap free of double-counts. */
+export const BACKFILL_OVERLAP_DAYS = 2;
+
 /**
- * Where should backfill stop? BUGGY VERSION: at the backfill's own snapshot time. But the snapshot was taken
- * before dual-write actually engaged (deploy lag), so events written to PG in [snapshot, dualWriteFrom) are in
- * neither the backfill nor the shadow — a gap. (Fixed in the next commit.)
+ * Where should backfill stop? Not at its own snapshot (that races the dual-write start and leaves a gap).
+ * Instead, backfill everything up to the dual-write start PLUS an overlap window. The overlap region is written
+ * by both backfill and the shadow, but uuid dedupe collapses it — so there is no gap and no double-count.
+ * Start the shadow first, then backfill up to and past it: overlap is safe, gaps are not.
  */
-export function planBackfillUpTo(backfillSnapshot: string, _dualWriteFrom: string): string {
-  return backfillSnapshot;
+export function planBackfillUpTo(_backfillSnapshot: string, dualWriteFrom: string): string {
+  return addDays(dualWriteFrom, BACKFILL_OVERLAP_DAYS);
 }
 
 /** The events ClickHouse contains after dual-write + backfill, deduped by uuid. */
