@@ -1,0 +1,54 @@
+{
+  "title": "Pulse — Ingestion Pipeline Health (S15)",
+  "description": "The four numbers that ARE the product's health. Panels map 1:1 to PipelineSample (packages/shared/pipeline-health.ts). Datasource-agnostic panel spec; wire the queries to your metrics backend (Prometheus/CH system tables).",
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Ingest rate (events/sec accepted)",
+      "type": "timeseries",
+      "metric": "pulse_ingest_accepted_total",
+      "query": "rate(pulse_ingest_accepted_total[1m])",
+      "note": "Customer-visible throughput. This is the count quotas meter from (accepted, not stored)."
+    },
+    {
+      "id": 2,
+      "title": "Consumer lag (backlog not yet stored)",
+      "type": "timeseries",
+      "metric": "pulse_stream_backlog",
+      "thresholds": { "warn": 50000, "crit": 250000 },
+      "note": "Lag = delivered-or-pending stream entries minus stored. The number the lag SLO burns against."
+    },
+    {
+      "id": 3,
+      "title": "DLQ depth",
+      "type": "stat",
+      "metric": "pulse_dlq_depth",
+      "thresholds": { "warn": 1, "crit": 1000 },
+      "note": "Any non-zero DLQ is a defect to triage. Replay path: runbooks/dlq-triage."
+    },
+    {
+      "id": 4,
+      "title": "Insert batch p95 (ms)",
+      "type": "timeseries",
+      "metric": "pulse_insert_batch_ms",
+      "query": "histogram_quantile(0.95, rate(pulse_insert_batch_ms_bucket[5m]))",
+      "thresholds": { "warn": 500, "crit": 2000 }
+    },
+    {
+      "id": 5,
+      "title": "Event-loss ratio (in vs stored, hourly reconcile)",
+      "type": "stat",
+      "metric": "pulse_loss_ratio",
+      "thresholds": { "warn": 0.0001, "crit": 0.001 },
+      "note": "The conscience metric. Target 0; alarm > 0.01%. Double-entry: accepted-in vs stored-in-CH."
+    },
+    {
+      "id": 6,
+      "title": "ClickHouse disk headroom (%)",
+      "type": "gauge",
+      "metric": "pulse_ch_disk_free_ratio",
+      "thresholds": { "warn": 0.25, "crit": 0.1 }
+    }
+  ]
+}
