@@ -17,6 +17,7 @@ export * from "./pii";
 export * from "./bucketing";
 export * from "./pipeline-health";
 export * from "./loss-accounting";
+export * from "./tracing";
 
 /** The event as the SDK sends it over the wire to `POST /e`. `ts` is the client's clock (trusted in S1; a
  *  deliberate flaw the ingest pipeline revisits in S04/S13 — clocks lie). */
