@@ -7,12 +7,16 @@ import { loadOrCreateDistinctId, uuid, DISTINCT_ID_KEY } from "./id";
 import { browserStorage, type SafeStorage } from "./storage";
 import { BatchTransport, httpSend, beaconSend, withRetry, type Transport } from "./transport";
 import { installAutoPageview } from "./pageview";
+import { evaluateLocal, type FlagPayload } from "./flags";
 
 const DEFAULT_HOST = "https://ingest.pulse.example";
+const FLAGS_KEY = "pulse_flags";
 
 export interface PulseDeps {
   storage?: SafeStorage;
   transport?: Transport;
+  /** Injectable flag fetch (S14) so tests/CI evaluate flags without a network. Prod fetches GET /flags/payload. */
+  fetchFlags?: (options: PulseOptions) => Promise<FlagPayload[]>;
 }
 
 export class Pulse {
@@ -20,6 +24,8 @@ export class Pulse {
   private storage: SafeStorage = browserStorage();
   private distinctId = "";
   private teardownPageview: (() => void) | null = null;
+  private flags: FlagPayload[] = [];
+  private flagProps: Record<string, unknown> = {};
   /** Host-supplied sink for the SDK's own errors, used by the never-throw boundary in index.ts. */
   onError: ((error: unknown) => void) | undefined;
 
@@ -42,6 +48,7 @@ export class Pulse {
       });
     this.distinctId = loadOrCreateDistinctId(this.storage);
     this.installLifecycleFlush();
+    this.initFlags(options);
 
     if (options.autocapturePageviews !== false) {
       this.teardownPageview = installAutoPageview(() => this.capture("$pageview", this.pageProps()));
@@ -97,6 +104,48 @@ export class Pulse {
   /** Current distinct id (mostly for tests/debugging). */
   getDistinctId(): string {
     return this.distinctId;
+  }
+
+  /**
+   * Load flags for evaluation (S14) with a staleness contract: cached flags (localStorage) apply IMMEDIATELY so
+   * first paint has an answer offline; a bootstrap payload (server-rendered) overrides them for no-flicker; then
+   * a fresh network fetch replaces both. Order matters — we never block first paint on the network.
+   */
+  private initFlags(options: PulseOptions): void {
+    this.flagProps = options.flagProperties ?? {};
+    const cached = this.storage.get(FLAGS_KEY);
+    if (cached) {
+      try {
+        this.flags = JSON.parse(cached) as FlagPayload[];
+      } catch {
+        /* corrupt cache — ignore, the fetch will refill it */
+      }
+    }
+    if (options.bootstrapFlags) this.flags = options.bootstrapFlags;
+    if (this.deps.fetchFlags) {
+      void this.deps
+        .fetchFlags(options)
+        .then((flags) => {
+          this.flags = flags;
+          this.storage.set(FLAGS_KEY, JSON.stringify(flags));
+        })
+        .catch((e: unknown) => this.onError?.(e));
+    }
+  }
+
+  /** The variant for a flag, evaluated locally (S14). Unknown flag → null. No network. */
+  getFeatureFlag(key: string): string | null {
+    const flag = this.flags.find((f) => f.key === key);
+    if (!flag) return null;
+    return evaluateLocal(flag, this.distinctId, this.flagProps);
+  }
+
+  /** Boolean convenience: true unless the flag resolves to its control/off (first) variant or is unknown. */
+  isFeatureEnabled(key: string): boolean {
+    const flag = this.flags.find((f) => f.key === key);
+    if (!flag) return false;
+    const variant = evaluateLocal(flag, this.distinctId, this.flagProps);
+    return variant !== flag.variants[0]?.key;
   }
 
   /** Teardown: restore history, stop the flush timer. Leave the host page as we found it. */

@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@pulse/config": "workspace:*",
+    "@pulse/shared": "workspace:*",
     "jsdom": "^25.0.1",
     "tsup": "^8.3.5",
     "typescript": "^5.6.3",

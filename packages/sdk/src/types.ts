@@ -29,4 +29,9 @@ export interface PulseOptions {
   maxQueue?: number;
   /** Optional sink for the SDK's *own* errors (it never throws into your page; it can tell you quietly). */
   onError?: (error: unknown) => void;
+  /** Flag definitions to evaluate on the FIRST paint (S14), before the network fetch returns — server-rendered
+   *  in and passed here so there's no flag flicker. The async fetch replaces them once it lands. */
+  bootstrapFlags?: import("./flags").FlagPayload[];
+  /** Person properties used for flag TARGETING predicates (plan, country, …). Evaluated locally. */
+  flagProperties?: Record<string, unknown>;
 }

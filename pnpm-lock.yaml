@@ -367,6 +367,9 @@ importers:
       '@pulse/config':
         specifier: workspace:*
         version: link:../config
+      '@pulse/shared':
+        specifier: workspace:*
+        version: link:../shared
       jsdom:
         specifier: ^25.0.1
         version: 25.0.1
