@@ -37,6 +37,14 @@ import { env } from "./env";
 import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
+import { createCohort, listCohorts } from "./cohorts";
+import { CohortSpecSchema } from "@pulse/insights";
+
+const CohortBody = zod.object({
+  projectId: zod.string().min(1).default("demo-project"),
+  name: zod.string().min(1).max(200),
+  definition: CohortSpecSchema,
+});
 
 /** Operational metrics for the ingestion pipeline — the numbers become an operational surface (S15 alerts here). */
 export interface IngestOps {
@@ -266,6 +274,18 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "ClickHouse funnel backend not wired" } });
     }
     return opts.chFunnel(body.spec, body.projectId);
+  });
+
+  /** Create a cohort (S09) — one AST for property or behavioral. */
+  app.post<{ Body: unknown }>("/cohorts", async (req, reply) => {
+    const body = CohortBody.parse(req.body);
+    const row = await createCohort(body.projectId, body.name, body.definition);
+    return reply.code(201).send({ id: row.id, kind: body.definition.kind });
+  });
+
+  /** List cohorts with their staleness (membersComputedAt) for the analyst UI. */
+  app.get<{ Querystring: { projectId?: string } }>("/cohorts", async (req) => {
+    return listCohorts(req.query.projectId ?? "demo-project");
   });
 
   /** Save an insight — the query DEFINITION, versioned, not its results. */
