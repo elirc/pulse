@@ -7,6 +7,7 @@ export * from "./funnel-spec";
 export * from "./funnel-naive";
 export * from "./funnel";
 export * from "./funnel-sql";
+export * from "./retention";
 export * from "./compute";
 export * from "./sql";
 export * from "./sql-clickhouse";

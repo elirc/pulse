@@ -8,12 +8,30 @@ import {
   FunnelSpecSchema,
   compileTrendSql,
   foldTopNRows,
+  computeRetention,
   UNIQ_RELATIVE_ERROR,
   type FlatRow,
   type TrendSpec,
   type FunnelSpec,
   type FunnelResult,
+  type RetentionResult,
+  type EventLike,
 } from "@pulse/insights";
+import { z as zod } from "zod";
+
+/** Fetches events for a project over a lookback window (from ClickHouse) — the "big scan" retention reads. */
+export type EventFetcher = (projectId: string, days: number) => Promise<EventLike[]>;
+
+const RetentionBody = zod.object({
+  projectId: zod.string().min(1).default("demo-project"),
+  spec: zod.object({
+    startEvent: zod.string().min(1).max(200).optional(),
+    returnEvent: zod.string().min(1).max(200).optional(),
+    granularity: zod.enum(["day", "week"]).default("week"),
+    periods: zod.number().int().min(1).max(52).default(8),
+    days: zod.number().int().min(1).max(365).default(56),
+  }),
+});
 import type { DailyCount } from "@pulse/shared";
 import { env } from "./env";
 import { requireSession } from "./auth";
@@ -41,6 +59,8 @@ export interface ApiServerOptions {
   chTrend?: TrendRunner;
   /** ClickHouse funnel backend (S08). Funnels run as windowFunnel() queries. */
   chFunnel?: FunnelRunner;
+  /** Event fetcher for retention (S09) — the big scan retention reads, then the grid is computed in-memory. */
+  chEvents?: EventFetcher;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
   readFromClickhouse?: boolean;
 }
@@ -223,6 +243,20 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       }
     }
     return { pg, ch, drift, ok: drift.length === 0 };
+  });
+
+  /**
+   * Retention (S09): computed ON READ. Fetch the project's recent events (the big scan) and compute the cohort
+   * grid in memory (the small output). Deliberately not materialized — analysts want it fresh (ADR-0008).
+   */
+  app.post<{ Body: unknown }>("/insights/retention", async (req, reply): Promise<RetentionResult | undefined> => {
+    const body = RetentionBody.parse(req.body);
+    if (!opts.chEvents) {
+      void reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Event source not wired" } });
+      return undefined;
+    }
+    const events = await opts.chEvents(body.projectId, body.spec.days);
+    return computeRetention(events, body.spec);
   });
 
   /** Funnel query (S08): ordered-step conversion via ClickHouse windowFunnel(). */
