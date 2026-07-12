@@ -34,7 +34,7 @@ const RetentionBody = zod.object({
     days: zod.number().int().min(1).max(365).default(56),
   }),
 });
-import type { DailyCount } from "@pulse/shared";
+import { canonicalHash, ResultCache, InMemoryCacheStore, type CacheStore, type DailyCount } from "@pulse/shared";
 import { env } from "./env";
 import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
@@ -73,6 +73,8 @@ export interface ApiServerOptions {
   chEvents?: EventFetcher;
   /** Resolve a cohort's members (S09) — property live / behavioral materialized. Used to filter any query. */
   cohortMembers?: (cohortId: string, projectId: string) => Promise<Set<string>>;
+  /** Tile result cache store (S10) — Redis in prod, in-memory in tests. */
+  cacheStore?: CacheStore;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
   readFromClickhouse?: boolean;
 }
@@ -110,6 +112,7 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   void app.register(cors, { origin: env.WEB_URL });
 
   const resolver = opts.resolver ?? new CachedKeyResolver(new PrismaKeyStore());
+  const resultCache = new ResultCache(opts.cacheStore ?? new InMemoryCacheStore());
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) {
@@ -275,6 +278,36 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     }
     return computeRetention(events, body.spec);
   });
+
+  /**
+   * A saved insight's CACHED result (S10) — a dashboard tile. Keyed on the query DEFINITION hash (not the URL),
+   * single-flight against the stampede, `computedAt` returned so the UI can show staleness. `?refresh=1` forces
+   * a recompute (the manual refresh button).
+   */
+  app.get<{ Params: { insightId: string }; Querystring: { refresh?: string } }>(
+    "/insights/:insightId/result",
+    async (req, reply) => {
+      const insight = await prisma.insight.findUnique({
+        where: { id: req.params.insightId },
+        select: { defKind: true, definition: true, defVersion: true, projectId: true },
+      });
+      if (!insight) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Insight not found" } });
+
+      const key = canonicalHash({ id: req.params.insightId, kind: insight.defKind, def: insight.definition, v: insight.defVersion });
+      return resultCache.getOrCompute(
+        key,
+        async () => {
+          if (insight.defKind === "funnel" && opts.chFunnel) {
+            return opts.chFunnel(FunnelSpecSchema.parse(insight.definition), insight.projectId);
+          }
+          const spec = TrendSpecSchema.parse(insight.definition);
+          const runner = opts.readFromClickhouse && opts.chTrend ? opts.chTrend : runTrendPg;
+          return runner(spec, insight.projectId);
+        },
+        req.query.refresh === "1",
+      );
+    },
+  );
 
   /** Funnel query (S08): ordered-step conversion via ClickHouse windowFunnel(). */
   app.post<{ Body: unknown }>("/insights/funnel", async (req, reply) => {
