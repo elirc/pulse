@@ -11,11 +11,19 @@ import {
   type EventLike,
   type TrendSpec,
 } from "@pulse/insights";
-import { buildApiServer, env, type IngestOps, type TrendRunner, type FunnelRunner, type EventFetcher } from "./server";
+import {
+  buildApiServer,
+  env,
+  type IngestOps,
+  type TrendRunner,
+  type FunnelRunner,
+  type EventFetcher,
+  type QueryCostEvent,
+} from "./server";
 import { resolveCohortMembers } from "./cohorts";
 import { TailHub } from "./tail";
 import { OnlineWindow, RedisSortedSetStore, type RedisZ } from "./online";
-import type { QueuedEvent } from "@pulse/shared";
+import { ConcurrencyLimiter, type QueuedEvent } from "@pulse/shared";
 
 // Wire ingestion metrics off Redis (not exercised in CI). streamDepth/dlqDepth are XLENs; consumerPending is
 // the group's pending-entries count.
@@ -51,7 +59,13 @@ void (async () => {
 
 // ClickHouse trend backend (S07): compile the same TrendSpec to CH SQL and run it. Used by /insights/trend/verify
 // always, and by /insights/trend once READ_FROM_CH flips.
-const ch = createClient({ url: env.CLICKHOUSE_URL, database: env.CLICKHOUSE_DB });
+// max_execution_time (S12): a hard server-side cap so a runaway scan can't hold a slot forever. Applied to every
+// analytical read; ClickHouse aborts the query at the limit rather than letting it consume the cluster.
+const ch = createClient({
+  url: env.CLICKHOUSE_URL,
+  database: env.CLICKHOUSE_DB,
+  clickhouse_settings: { max_execution_time: env.MAX_QUERY_SECONDS },
+});
 const chTrend: TrendRunner = async (spec, projectId) => {
   // Transparent rollup routing (S12): eligible daily count/unique queries read the pre-aggregated rollup.
   const { text, params } = isRollupEligible(spec)
@@ -126,6 +140,16 @@ const chEvents: EventFetcher = async (projectId, days) => {
   }));
 };
 
+// Per-project concurrency cap + cost telemetry (S12). The limiter is in-memory per API instance; behind N
+// replicas the effective cap is N×, which is fine — it's a guardrail against a single tenant's runaway
+// dashboard, not a global quota. onQueryCost logs structured cost lines a metrics pipeline can scrape.
+const queryLimiter = new ConcurrencyLimiter(env.MAX_QUERY_CONCURRENCY);
+const onQueryCost = (e: QueryCostEvent): void => {
+  console.log(
+    JSON.stringify({ at: "query.cost", ...e }),
+  );
+};
+
 const app = buildApiServer({
   ingestOps,
   chTrend,
@@ -136,6 +160,8 @@ const app = buildApiServer({
   cohortMembers: resolveCohortMembers,
   tailHub,
   onlineWindow,
+  queryLimiter,
+  onQueryCost,
   readFromClickhouse: env.READ_FROM_CH,
 });
 app
