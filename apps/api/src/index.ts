@@ -4,6 +4,9 @@ import { RedisEventStream, type RedisLike } from "@pulse/stream";
 import { compileTrendClickhouse, compileFunnelClickhouse, foldTopNRows, type FlatRow, type EventLike } from "@pulse/insights";
 import { buildApiServer, env, type IngestOps, type TrendRunner, type FunnelRunner, type EventFetcher } from "./server";
 import { resolveCohortMembers } from "./cohorts";
+import { TailHub } from "./tail";
+import { OnlineWindow, RedisSortedSetStore, type RedisZ } from "./online";
+import type { QueuedEvent } from "@pulse/shared";
 
 // Wire ingestion metrics off Redis (not exercised in CI). streamDepth/dlqDepth are XLENs; consumerPending is
 // the group's pending-entries count.
@@ -15,6 +18,27 @@ const ingestOps: IngestOps = {
   consumerPending: () => main.pending(env.CONSUMER_GROUP),
   dlqDepth: () => dlq.depth(),
 };
+
+// Live tail (S11): a dedicated fan-out consumer group reads the ingest stream and feeds the hub. Its own group,
+// so tail readers never touch the insert consumer's pending list.
+const tailHub = new TailHub();
+const onlineWindow = new OnlineWindow(new RedisSortedSetStore(redis as unknown as RedisZ));
+const tailStream = new RedisEventStream<QueuedEvent>(redis as unknown as RedisLike, env.STREAM_KEY, "tail");
+void (async () => {
+  await tailStream.ensureGroup("tail");
+  for (;;) {
+    const entries = await tailStream.readNew("tail", 500);
+    for (const e of entries) {
+      tailHub.push(e.data);
+      void onlineWindow.seen(e.data.projectId, e.data.distinctId, Date.now()); // mark active for online-now
+    }
+    await tailStream.ack(
+      "tail",
+      entries.map((e) => e.id),
+    );
+    if (entries.length === 0) await new Promise((r) => setTimeout(r, 200));
+  }
+})();
 
 // ClickHouse trend backend (S07): compile the same TrendSpec to CH SQL and run it. Used by /insights/trend/verify
 // always, and by /insights/trend once READ_FROM_CH flips.
@@ -73,6 +97,8 @@ const app = buildApiServer({
   chFunnel,
   chEvents,
   cohortMembers: resolveCohortMembers,
+  tailHub,
+  onlineWindow,
   readFromClickhouse: env.READ_FROM_CH,
 });
 app

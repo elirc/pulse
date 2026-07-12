@@ -14,6 +14,7 @@ import type { EventStore, StorableEvent } from "./store";
 import type { ColumnStore } from "./columnstore";
 import type { DeadLetterQueue } from "./dlq";
 import type { IdentityResolver } from "./identity";
+import type { Sessionizer } from "./session";
 
 export interface WorkerDeps {
   stream: EventStream<QueuedEvent>;
@@ -21,6 +22,8 @@ export interface WorkerDeps {
   store?: EventStore;
   dlq: DeadLetterQueue;
   resolver: IdentityResolver;
+  /** Stamp $session_id at ingest (S11). Optional; when present, runs before insert. */
+  sessionizer?: Sessionizer;
   group: string;
   batchSize: number;
   /** ClickHouse store. A shadow while `store` is present (dual-write); the source of truth once it isn't. */
@@ -58,7 +61,9 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
   const enrichedBatch = batchEnrich(valid);
 
   const good: StorableEvent[] = [];
-  for (const enriched of enrichedBatch) {
+  for (const raw of enrichedBatch) {
+    // Session-ization stamp ($session_id / $session_v) at ingest time (S11).
+    const enriched = deps.sessionizer ? await deps.sessionizer.stamp(raw) : raw;
     // An $identify event carries the previous anonymous id in props; merge before resolving so the event (and
     // all future ones for either id) resolves to the surviving person.
     if (enriched.name === "$identify" && typeof enriched.props.$anon_distinct_id === "string") {

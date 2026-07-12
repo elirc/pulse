@@ -41,6 +41,9 @@ import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
 import { createShareToken, resolveShareToken } from "./share";
+import { TailHub } from "./tail";
+import { OnlineWindow } from "./online";
+import { randomUUID } from "node:crypto";
 import { CohortSpecSchema } from "@pulse/insights";
 
 const CohortBody = zod.object({
@@ -66,6 +69,10 @@ export interface ApiServerOptions {
   resolver?: CachedKeyResolver;
   /** Ingestion pipeline metrics source; wired to Redis in production, an in-memory fake in tests. */
   ingestOps?: IngestOps;
+  /** Live-tail fan-out hub (S11) — fed by a dedicated tail consumer group in the entry. */
+  tailHub?: TailHub;
+  /** "Online now" sliding-window counter (S11). */
+  onlineWindow?: OnlineWindow;
   /** ClickHouse trend backend (S07). When present + readFromClickhouse, trends read CH; verify runs both. */
   chTrend?: TrendRunner;
   /** ClickHouse funnel backend (S08). Funnels run as windowFunnel() queries. */
@@ -124,6 +131,31 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   });
 
   app.get("/health", async () => ({ status: "ok" }));
+
+  /**
+   * Live event tail (S11): Server-Sent Events from a dedicated fan-out group (wired in the entry). Replaces the
+   * S05 raw-table polling feed. A slow client gets a bounded ring buffer that DROPS old frames (freshness >
+   * completeness) and reports the drop count — it never back-pressures the pipeline.
+   */
+  app.get<{ Querystring: { projectId?: string; event?: string; distinctId?: string } }>("/events/tail", (req, reply) => {
+    const hub = opts.tailHub;
+    if (!hub) {
+      void reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Live tail not wired" } });
+      return;
+    }
+    const id = randomUUID();
+    hub.subscribe(id, { projectId: req.query.projectId, event: req.query.event, distinctId: req.query.distinctId });
+    reply.hijack();
+    reply.raw.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    const timer = setInterval(() => {
+      const frame = hub.drain(id);
+      if (frame.events.length > 0 || frame.dropped > 0) reply.raw.write(`data: ${JSON.stringify(frame)}\n\n`);
+    }, 500);
+    req.raw.on("close", () => {
+      clearInterval(timer);
+      hub.unsubscribe(id);
+    });
+  });
 
   /**
    * Ingestion pipeline health (S04): stream backlog, consumer pending (in-flight, unacked), and DLQ size.
@@ -460,20 +492,14 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       ORDER BY "ts" DESC LIMIT 100`;
   });
 
-  /**
-   * Live events feed (S05): the latest 100 events for a project, newest first, for the "is it working?" view.
-   * Ordered by server receive time so events show up in arrival order.
-   */
-  app.get<{ Querystring: { projectId?: string } }>("/events/live", async (req) => {
-    const projectId = req.query.projectId ?? "demo-project";
-    type LiveRow = { id: string; name: string; distinctId: string; ts: string };
-    const rows = await prisma.$queryRaw<LiveRow[]>`
-      SELECT "id", "name", "distinctId", to_char("ts", 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ts
-      FROM "Event"
-      WHERE "projectId" = ${projectId}
-      ORDER BY "ingestedAt" DESC
-      LIMIT 100`;
-    return rows;
+  // The S05 raw-table live poll (GET /events/live) was DELETED in S11 (flaw #4 harvest): it scanned the events
+  // table on every 5s poll, ordered by an unindexed column, for every viewer. Replaced by the SSE tail above,
+  // which streams from a dedicated fan-out consumer group and never touches the events store.
+
+  /** "Online now" (S11): distinct visitors in the last few minutes, from the Redis sliding window. */
+  app.get<{ Querystring: { projectId?: string } }>("/online", async (req, reply) => {
+    if (!opts.onlineWindow) return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Online window not wired" } });
+    return { online: await opts.onlineWindow.count(req.query.projectId ?? "demo-project") };
   });
 
   /**
