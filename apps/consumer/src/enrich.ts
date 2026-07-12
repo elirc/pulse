@@ -71,3 +71,27 @@ export function enrich(event: QueuedEvent): QueuedEvent {
     props: { ...event.props, $os: os, $browser: browser, $device: device, $geo_country: geoLookup(ip) },
   };
 }
+
+/**
+ * Batch enrichment (S07) — the harvest of flaw #2. The old path called enrich() per event inside the consumer
+ * loop, re-parsing the SAME user-agent string and re-looking-up the SAME ip for every event in a session (a
+ * batch is usually one user's burst — hundreds of events, a handful of distinct UAs/ips). Memoizing the parse
+ * per DISTINCT value across the batch turns O(events) expensive parses into O(distinct-values). Same output,
+ * far less work — vectorize over the batch instead of grinding it one row at a time.
+ */
+export function batchEnrich(events: QueuedEvent[]): QueuedEvent[] {
+  const uaCache = new Map<string, UaInfo>();
+  const geoCache = new Map<string, string>();
+  return events.map((event) => {
+    const ua = typeof event.props.$user_agent === "string" ? event.props.$user_agent : "";
+    const ip = typeof event.props.$ip === "string" ? event.props.$ip : "";
+    let uaInfo = uaCache.get(ua);
+    if (!uaInfo) uaCache.set(ua, (uaInfo = parseUserAgent(ua)));
+    let country = geoCache.get(ip);
+    if (country === undefined) geoCache.set(ip, (country = geoLookup(ip)));
+    return {
+      ...event,
+      props: { ...event.props, $os: uaInfo.os, $browser: uaInfo.browser, $device: uaInfo.device, $geo_country: country },
+    };
+  });
+}

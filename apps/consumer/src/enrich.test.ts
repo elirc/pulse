@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseUserAgent, geoLookup, enrich } from "./enrich";
+import { parseUserAgent, geoLookup, enrich, batchEnrich } from "./enrich";
 import type { QueuedEvent } from "@pulse/shared";
 
 describe("enrichment (S04)", () => {
@@ -30,5 +30,14 @@ describe("enrichment (S04)", () => {
     };
     const out = enrich(event);
     expect(out.props).toMatchObject({ plan: "pro", $os: "Windows", $browser: "Chrome", $geo_country: "US" });
+  });
+
+  it("batchEnrich produces the same per-event output as enrich (S07)", () => {
+    const events: QueuedEvent[] = [
+      { uuid: "a", projectId: "p", distinctId: "u", name: "e", props: { $user_agent: "Mozilla/5.0 (Windows NT 10.0) Chrome/120", $ip: "8.8.8.8" }, ts: "t", ingestedAt: "t" },
+      { uuid: "b", projectId: "p", distinctId: "u", name: "e", props: { $user_agent: "Mozilla/5.0 (iPhone; iOS 17) Safari/604", $ip: "103.1.2.3" }, ts: "t", ingestedAt: "t" },
+    ];
+    const batched = batchEnrich(events);
+    expect(batched.map((e) => e.props)).toEqual(events.map((e) => enrich(e).props));
   });
 });
