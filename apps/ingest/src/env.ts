@@ -11,6 +11,8 @@ const EnvSchema = z.object({
   // S13 per-key rate limit (token bucket): burst capacity + sustained events/sec per write key's project.
   RATE_LIMIT_BURST: z.coerce.number().default(500),
   RATE_LIMIT_PER_SEC: z.coerce.number().default(200),
+  // S15 per-project monthly event allowance (quota). Metered from accepted counts; hard limit sheds with 429.
+  QUOTA_MONTHLY_ALLOWANCE: z.coerce.number().default(100_000_000),
 });
 
 export const env = EnvSchema.parse(process.env);

@@ -28,16 +28,36 @@ breaks" becomes a *measured, witnessed* event, not a slogan.
 - **Measurement as a habit** — a traffic generator from Sprint 1; k6 from Sprint 5; every pipeline PR reports
   measured throughput/latency.
 
+## Status
+
+**v1.0.0 — all 15 sprints shipped.** Ingestion, SDK, identity, insights (trends/funnels/retention/cohorts), the
+Postgres→ClickHouse migration, dashboards & sharing, live events, sampling & query-cost control, pipeline
+hardening & GDPR, feature flags & experiments, and production readiness (observability, quotas, incident
+readiness). All five planted flaws harvested. See `CHANGELOG.md`.
+
 ## Stack
 
 pnpm + Turborepo · TypeScript strict · `apps/web` (analyst UI) · `apps/api` (Fastify) · `apps/ingest` (the hot
-path, a separate deployable) · `apps/consumer` (stream workers) · `packages/{sdk, db (Prisma), shared, config,
-loadgen}` · Postgres → ClickHouse · Redis Streams.
+path, a separate deployable) · `apps/consumer` (stream workers) · `apps/jobs` (scheduled) · `packages/{sdk, db
+(Prisma), shared, config, loadgen, auth, stream, insights, flags}` · Postgres → ClickHouse · Redis Streams.
 
 CI runs **without live infra** — pure cores + in-memory fakes; DB/queue/stream wiring is verified via typecheck
-+ build. The SDK bundle budget is CI-enforced. Perf numbers come from local/lab k6 runs, reported in PR bodies.
++ build. The SDK bundle budget is CI-enforced (3.1 KB gz / 6 KB). Perf numbers come from local/lab k6 runs,
+reported in PR bodies.
+
+## Run it
+```bash
+pnpm install
+docker compose up --build          # postgres + redis + clickhouse + services
+pnpm dev                           # web + api + ingest + consumer
+```
+See `docs/ops/deploy.md` for staging/prod, `docs/ops/runbooks.md` for on-call, `docs/ops/backups.md` for
+backup/restore.
 
 ## Docs
 - `SPEC.md` — the product spec + curriculum.
 - `docs/sprints/` — the 15 sprint playbooks + the ritual (`00-workflow.md`) + the flaw ledger.
-- `docs/adr/` — architecture decisions. `docs/curriculum/` — per-sprint learning notes.
+- `docs/adr/` — architecture decisions (0001–0011). `docs/curriculum/` — per-sprint learning notes.
+- `docs/ops/` — dashboards, alerts, runbooks, backups, postmortems (Sprint 15).
+- `docs/experiments/` — the peeking simulation + methodology (Sprint 14).
+- `CHANGELOG.md` — the release history, sprint by sprint.

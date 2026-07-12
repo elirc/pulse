@@ -12,6 +12,7 @@ import {
   scrubProps,
   redactKeyInUrl,
   type QueuedEvent,
+  type QuotaAssessment,
 } from "@pulse/shared";
 import type { StreamProducer } from "@pulse/stream";
 import { env } from "./env";
@@ -39,6 +40,10 @@ export interface IngestServerOptions {
   depthSampleMs?: number;
   /** Per-write-key rate limiter (S13). Injected so tests control the clock; absent → no per-key limit. */
   rateLimiter?: KeyedRateLimiter;
+  /** Per-project monthly quota check (S15). Returns the assessment; a "hard" state sheds with 429. Absent → off. */
+  quotaCheck?: (projectId: string) => Promise<QuotaAssessment>;
+  /** Metering hook (S15): called with the accepted event count after enqueue, to advance the usage counter. */
+  onAccepted?: (projectId: string, count: number) => void;
 }
 
 /** Extract the presented write key: `Authorization: Bearer <key>`, or a `?k=` query param for pixel/no-header
@@ -126,6 +131,20 @@ export function buildIngestServer(opts: IngestServerOptions): FastifyInstance {
         .send({ error: { code: "BACKPRESSURE", message: "Ingest is shedding load; retry shortly" } });
     }
 
+    // Quota (S15): a project over its monthly allowance is shed with 429. Metered from ACCEPTED counts (what the
+    // customer sees us take), never stored counts — billing off post-loss storage would be a conflict of interest.
+    if (opts.quotaCheck) {
+      const quota = await opts.quotaCheck(resolved.projectId);
+      if (quota.state === "hard") {
+        return reply
+          .code(429)
+          .header("retry-after", "3600")
+          .header("x-quota-state", "hard")
+          .send({ error: { code: "QUOTA_EXCEEDED", message: "Monthly event allowance exhausted" } });
+      }
+      if (quota.state === "soft") void reply.header("x-quota-state", "soft"); // the banner signal
+    }
+
     const inputs = Array.isArray(req.body) ? BatchSchema.parse(req.body) : [EventInputSchema.parse(req.body)];
     // Per-key rate limit (S13): cost = number of events, keyed on the tenant (projectId). A token bucket allows
     // bursts (a page firing 20 events on load) up to capacity while bounding the sustained rate. A throttled
@@ -160,6 +179,8 @@ export function buildIngestServer(opts: IngestServerOptions): FastifyInstance {
       };
       await stream.add(queued);
     }
+    // Meter what we ACCEPTED (S15) — the customer-visible count quotas and billing read from.
+    opts.onAccepted?.(resolved.projectId, inputs.length);
     // 202 Accepted — not 200 OK. We have durably queued the event; we have NOT processed it. The SDK must
     // assume nothing about queryability from this response.
     return reply.code(202).send({ accepted: inputs.length });

@@ -284,6 +284,12 @@ const app = buildApiServer({
   cacheStore,
   deletionPorts,
   experimentCounts,
+  // Quota metering dashboard (S15): read the same Redis monthly counter ingest advances (accepted counts).
+  quotaUsage: async (projectId: string) => {
+    const key = `pulse:usage:${projectId}:${new Date().toISOString().slice(0, 7)}`;
+    const used = Number((await redis.get(key)) ?? 0);
+    return { used, allowance: env.QUOTA_MONTHLY_ALLOWANCE };
+  },
   readFromClickhouse: env.READ_FROM_CH,
 });
 app

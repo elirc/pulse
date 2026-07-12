@@ -54,6 +54,7 @@ import { createCohort, listCohorts } from "./cohorts";
 import { createFlag, listFlags, flagPayload } from "./flags";
 import { createExperiment, listExperiments, setExperimentStatus } from "./experiments";
 import { FlagSpecSchema, computeExperimentResult, type VariantCount } from "@pulse/flags";
+import { assessQuota } from "@pulse/shared";
 import { createShareToken, resolveShareToken, revokeShareToken } from "./share";
 import { executePersonDeletion, type DeletionPorts } from "./deletion";
 import { TailHub } from "./tail";
@@ -134,6 +135,8 @@ export interface ApiServerOptions {
   deletionPorts?: DeletionPorts;
   /** Experiment exposure→goal counts per variant (S14) — from a CH funnel. Absent → the results endpoint 503s. */
   experimentCounts?: (experimentId: string, projectId: string) => Promise<VariantCount[]>;
+  /** Per-project usage + allowance for the metering dashboard (S15). Absent → the usage endpoint 503s. */
+  quotaUsage?: (projectId: string) => Promise<{ used: number; allowance: number }>;
 }
 
 const IssueKeyBody = z.object({
@@ -226,6 +229,15 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       opts.ingestOps.dlqDepth(),
     ]);
     return { streamDepth, consumerPending, dlqDepth };
+  });
+
+  /** Per-project usage vs allowance (S15) — the metering dashboard's source. state: ok | soft | hard. */
+  app.get<{ Querystring: { projectId?: string } }>("/ops/usage", async (req, reply) => {
+    if (!opts.quotaUsage) {
+      return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Quota metering not wired" } });
+    }
+    const { used, allowance } = await opts.quotaUsage(req.query.projectId ?? "demo-project");
+    return assessQuota(used, allowance);
   });
 
   /**
