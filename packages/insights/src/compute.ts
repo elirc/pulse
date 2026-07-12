@@ -6,10 +6,12 @@
  */
 import { OTHER_BUCKET, type Filter, type Metric, type TrendSpec } from "./spec";
 
-/** The minimal event shape the interpreter needs. `ts` is event time. */
+/** The minimal event shape the interpreter needs. `ts` is event time. `personId` (S06) is the true unit for
+ *  unique counts; it falls back to `distinctId` for events with no resolved person. */
 export interface EventLike {
   name: string;
   distinctId: string;
+  personId?: string | null;
   props: Record<string, unknown>;
   ts: Date;
 }
@@ -62,7 +64,8 @@ export function bucketKey(ts: Date, interval: TrendSpec["interval"]): string {
 }
 
 function metricValue(events: EventLike[], metric: Metric): number {
-  if (metric === "unique") return new Set(events.map((e) => e.distinctId)).size;
+  // Unique counts distinct person (S06); fall back to distinctId when a person hasn't been resolved.
+  if (metric === "unique") return new Set(events.map((e) => e.personId ?? e.distinctId)).size;
   return events.length;
 }
 

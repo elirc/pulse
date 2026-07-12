@@ -59,6 +59,33 @@ model Project {
   @@index([orgId])
 }
 
+// The identity graph (S06). A Person is one human; the many browser/user distinctIds they accumulate all point
+// at them through DistinctIdMapping. Resolution happens on the WRITE path (the consumer) and freezes a personId
+// onto each event — so a later merge changes only the mapping table, never the immutable event rows.
+model Person {
+  id         String              @id @default(cuid())
+  projectId  String
+  properties Json                @default("{}")
+  createdAt  DateTime            @default(now())
+  mappings   DistinctIdMapping[]
+
+  @@index([projectId])
+}
+
+model DistinctIdMapping {
+  id         String   @id @default(cuid())
+  projectId  String
+  distinctId String
+  personId   String
+  createdAt  DateTime @default(now())
+  person     Person   @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  // One distinctId maps to exactly one person per project — the unique constraint that turns the create-on-
+  // first-sight race into a caught error instead of a silent duplicate.
+  @@unique([projectId, distinctId])
+  @@index([personId])
+}
+
 // A saved insight (S05) is a stored QUERY DEFINITION, not stored results. Persisting the definition (a
 // versioned TrendSpec JSON) — not a materialized answer — is what lets S07 swap the query backend
 // (Postgres → ClickHouse) under a hundred saved insights without touching any of them: migrate the compiler,
@@ -117,6 +144,10 @@ model Event {
   uuid       String   @unique
   projectId  String   @default("demo-project")
   distinctId String
+  // Resolved on the WRITE path (S06) and frozen here. Unique-user queries count distinct personId, not
+  // distinctId — the true count once identity merges collapse a person's many ids. Nullable for events
+  // predating identity resolution.
+  personId   String?
   name       String
   props      Json     @default("{}")
   ts         DateTime // event time

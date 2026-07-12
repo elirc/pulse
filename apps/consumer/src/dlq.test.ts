@@ -3,6 +3,8 @@ import { InMemoryEventStream } from "@pulse/stream";
 import type { QueuedEvent } from "@pulse/shared";
 import { InMemoryEventStore } from "./store";
 import { InMemoryDeadLetterQueue } from "./dlq";
+import { IdentityResolver } from "./identity";
+import { InMemoryPersonStore } from "./personstore";
 import { processNewBatch } from "./worker";
 import { replayRecords } from "./replay";
 
@@ -32,7 +34,7 @@ describe("dead-letter queue (S04)", () => {
     await stream.add({ uuid: "", name: "" } as unknown as QueuedEvent);
     await stream.add(qe("good-2"));
 
-    const n = await processNewBatch({ stream, store, dlq, group: GROUP, batchSize: 100 });
+    const n = await processNewBatch({ stream, store, dlq, resolver: new IdentityResolver(new InMemoryPersonStore()), group: GROUP, batchSize: 100 });
     expect(n).toBe(3); // all three entries handled...
     expect(store.events.map((e) => e.uuid)).toEqual(["good-1", "good-2"]); // ...two stored...
     expect(dlq.records).toHaveLength(1); // ...one dead-lettered with error context

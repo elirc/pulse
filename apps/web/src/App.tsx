@@ -4,13 +4,14 @@ import { Setup } from "./Setup";
 import { Docs } from "./Docs";
 import { Insights } from "./Insights";
 import { Live } from "./Live";
+import { Persons } from "./Persons";
 
 interface DailyCount {
   day: string;
   count: number;
 }
 
-type View = "insights" | "trends" | "live" | "setup" | "docs";
+type View = "insights" | "trends" | "live" | "persons" | "setup" | "docs";
 
 /**
  * The analyst shell (S01). One insight — a daily-count line chart over the event firehose — rendered from
@@ -61,11 +62,13 @@ export function App(): JSX.Element {
         {tab("insights", "Events per day")}
         {tab("trends", "Insights")}
         {tab("live", "Live")}
+        {tab("persons", "Persons")}
         {tab("setup", "Setup")}
         {tab("docs", "SDK Docs")}
       </nav>
       {view === "trends" && <Insights />}
       {view === "live" && <Live />}
+      {view === "persons" && <Persons />}
       {view === "docs" && <Docs />}
       {view === "setup" && <Setup />}
       {view === "insights" && (

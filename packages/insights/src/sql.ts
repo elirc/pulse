@@ -43,7 +43,10 @@ export function compileTrendSql(spec: TrendSpec, projectId: string): CompiledQue
 
   // interval and metric come from zod enums (closed sets) — safe to inline. Nothing else is.
   const bucketExpr = `to_char(date_trunc('${spec.interval}', "ts"), 'YYYY-MM-DD')`;
-  const metricExpr = spec.metric === "unique" ? `count(distinct "distinctId")` : `count(*)`;
+  // Unique users count distinct PERSON (S06), not distinctId — one human with two devices is one user. Fall
+  // back to distinctId for events that predate identity resolution (null personId).
+  const metricExpr =
+    spec.metric === "unique" ? `count(distinct coalesce("personId", "distinctId"))` : `count(*)`;
 
   const where: string[] = [
     `"projectId" = ${bind(projectId)}`,

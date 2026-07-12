@@ -10,15 +10,22 @@
 import { QueuedEventSchema, type QueuedEvent } from "@pulse/shared";
 import type { EventStream } from "@pulse/stream";
 import { enrich } from "./enrich";
-import type { EventStore } from "./store";
+import type { EventStore, StorableEvent } from "./store";
 import type { DeadLetterQueue } from "./dlq";
+import type { IdentityResolver } from "./identity";
 
 export interface WorkerDeps {
   stream: EventStream<QueuedEvent>;
   store: EventStore;
   dlq: DeadLetterQueue;
+  resolver: IdentityResolver;
   group: string;
   batchSize: number;
+}
+
+/** Narrow an unknown props value to a plain record (property directives), or undefined. */
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 }
 
 async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<number> {
@@ -28,9 +35,9 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
       : await deps.stream.readPending(deps.group, deps.batchSize);
   if (entries.length === 0) return 0;
 
-  // Validate + enrich each event. A poison entry (fails the shape check) is dead-lettered and acked, so it can
-  // never wedge the group behind it. Good events are enriched and go to the batch insert.
-  const good: QueuedEvent[] = [];
+  // Validate → resolve person (write-path identity) → enrich → batch insert. A poison entry (fails the shape
+  // check) is dead-lettered and acked, so it can never wedge the group behind it.
+  const good: StorableEvent[] = [];
   const ackIds: string[] = [];
   for (const entry of entries) {
     const parsed = QueuedEventSchema.safeParse(entry.data);
@@ -39,7 +46,18 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
       ackIds.push(entry.id); // poison is durably in the DLQ now — ack so it isn't redelivered
       continue;
     }
-    good.push(enrich(parsed.data));
+    const enriched = enrich(parsed.data);
+    // An $identify event carries the previous anonymous id in props; merge before resolving so the event (and
+    // all future ones for either id) resolves to the surviving person.
+    if (enriched.name === "$identify" && typeof enriched.props.$anon_distinct_id === "string") {
+      await deps.resolver.identify(enriched.projectId, enriched.props.$anon_distinct_id, enriched.distinctId);
+    }
+    const personId = await deps.resolver.resolve(enriched.projectId, enriched.distinctId);
+    // Apply person-property directives ($set / $set_once) carried on the event.
+    const set = asRecord(enriched.props.$set);
+    const setOnce = asRecord(enriched.props.$set_once);
+    if (set || setOnce) await deps.resolver.setProperties(personId, set ?? {}, setOnce ?? {});
+    good.push({ ...enriched, personId });
     ackIds.push(entry.id);
   }
   if (good.length > 0) await deps.store.insertBatch(good);
