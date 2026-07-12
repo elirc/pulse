@@ -1,8 +1,9 @@
 import Redis from "ioredis";
 import { createClient } from "@clickhouse/client";
 import { RedisEventStream, type RedisLike } from "@pulse/stream";
-import { compileTrendClickhouse, compileFunnelClickhouse, foldTopNRows, type FlatRow } from "@pulse/insights";
-import { buildApiServer, env, type IngestOps, type TrendRunner, type FunnelRunner } from "./server";
+import { compileTrendClickhouse, compileFunnelClickhouse, foldTopNRows, type FlatRow, type EventLike } from "@pulse/insights";
+import { buildApiServer, env, type IngestOps, type TrendRunner, type FunnelRunner, type EventFetcher } from "./server";
+import { resolveCohortMembers } from "./cohorts";
 
 // Wire ingestion metrics off Redis (not exercised in CI). streamDepth/dlqDepth are XLENs; consumerPending is
 // the group's pending-entries count.
@@ -47,7 +48,33 @@ const chFunnel: FunnelRunner = async (spec, projectId) => {
   };
 };
 
-const app = buildApiServer({ ingestOps, chTrend, chFunnel, readFromClickhouse: env.READ_FROM_CH });
+// Event fetcher for retention (S09): pull recent events from ClickHouse; the grid is computed in-memory.
+const chEvents: EventFetcher = async (projectId, days) => {
+  const rs = await ch.query({
+    query:
+      "SELECT name, distinctId, personId, toUnixTimestamp64Milli(ts) AS tsMs FROM events " +
+      "WHERE projectId = {pid:String} AND ts >= now() - toIntervalDay({days:UInt16})",
+    query_params: { pid: projectId, days },
+    format: "JSONEachRow",
+  });
+  const rows = (await rs.json()) as Array<{ name: string; distinctId: string; personId: string; tsMs: string | number }>;
+  return rows.map<EventLike>((r) => ({
+    name: r.name,
+    distinctId: r.distinctId,
+    personId: r.personId || null,
+    props: {},
+    ts: new Date(Number(r.tsMs)),
+  }));
+};
+
+const app = buildApiServer({
+  ingestOps,
+  chTrend,
+  chFunnel,
+  chEvents,
+  cohortMembers: resolveCohortMembers,
+  readFromClickhouse: env.READ_FROM_CH,
+});
 app
   .listen({ port: env.API_PORT, host: "0.0.0.0" })
   .then(() => {

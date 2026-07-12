@@ -60,4 +60,9 @@ describe("saved insights (S05)", () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it("rejects a cohort with an unknown kind (400) — the discriminated AST", async () => {
+    const res = await app.inject({ method: "POST", url: "/cohorts", payload: { name: "x", definition: { kind: "vibes" } } });
+    expect(res.statusCode).toBe(400);
+  });
 });

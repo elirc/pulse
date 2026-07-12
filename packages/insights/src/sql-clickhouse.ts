@@ -21,6 +21,8 @@ export interface CompiledChQuery {
 export interface ChCompileOptions {
   /** Use uniqExact instead of the approximate uniq for the unique metric. Default false (approximate). */
   exact?: boolean;
+  /** Restrict to a cohort's members (S09): the resolved personIds. Adds `AND person IN (…)`. */
+  cohortMembers?: string[];
 }
 
 /** Relative error bound of ClickHouse `uniq()` (HyperLogLog), documented for the golden-parity tolerance. */
@@ -60,6 +62,9 @@ export function compileTrendClickhouse(
   ];
   if (spec.event !== undefined) where.push(`name = ${bind(spec.event, "String")}`);
   for (const f of spec.filters) where.push(filterCh(f, bind));
+  // Cohort filter (S09): restrict to the resolved member personIds. (The membership itself is materialized in
+  // Postgres and resolved app-side; at scale a CH-side membership table or dictionary replaces the IN-list.)
+  if (opts.cohortMembers) where.push(`${personExpr} IN ${bind(opts.cohortMembers, "Array(String)")}`);
 
   const cols = [`${bucketExpr(spec.interval)} AS bucket`];
   const groupBy = ["1"];

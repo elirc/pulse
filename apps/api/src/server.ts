@@ -8,17 +8,45 @@ import {
   FunnelSpecSchema,
   compileTrendSql,
   foldTopNRows,
+  computeRetention,
   UNIQ_RELATIVE_ERROR,
   type FlatRow,
   type TrendSpec,
   type FunnelSpec,
   type FunnelResult,
+  type RetentionResult,
+  type EventLike,
 } from "@pulse/insights";
+import { z as zod } from "zod";
+
+/** Fetches events for a project over a lookback window (from ClickHouse) — the "big scan" retention reads. */
+export type EventFetcher = (projectId: string, days: number) => Promise<EventLike[]>;
+
+const RetentionBody = zod.object({
+  projectId: zod.string().min(1).default("demo-project"),
+  /** Optional cohort filter (S09): restrict retention to this cohort's members. */
+  cohort: zod.string().min(1).optional(),
+  spec: zod.object({
+    startEvent: zod.string().min(1).max(200).optional(),
+    returnEvent: zod.string().min(1).max(200).optional(),
+    granularity: zod.enum(["day", "week"]).default("week"),
+    periods: zod.number().int().min(1).max(52).default(8),
+    days: zod.number().int().min(1).max(365).default(56),
+  }),
+});
 import type { DailyCount } from "@pulse/shared";
 import { env } from "./env";
 import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
+import { createCohort, listCohorts } from "./cohorts";
+import { CohortSpecSchema } from "@pulse/insights";
+
+const CohortBody = zod.object({
+  projectId: zod.string().min(1).default("demo-project"),
+  name: zod.string().min(1).max(200),
+  definition: CohortSpecSchema,
+});
 
 /** Operational metrics for the ingestion pipeline — the numbers become an operational surface (S15 alerts here). */
 export interface IngestOps {
@@ -41,6 +69,10 @@ export interface ApiServerOptions {
   chTrend?: TrendRunner;
   /** ClickHouse funnel backend (S08). Funnels run as windowFunnel() queries. */
   chFunnel?: FunnelRunner;
+  /** Event fetcher for retention (S09) — the big scan retention reads, then the grid is computed in-memory. */
+  chEvents?: EventFetcher;
+  /** Resolve a cohort's members (S09) — property live / behavioral materialized. Used to filter any query. */
+  cohortMembers?: (cohortId: string, projectId: string) => Promise<Set<string>>;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
   readFromClickhouse?: boolean;
 }
@@ -225,6 +257,25 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     return { pg, ch, drift, ok: drift.length === 0 };
   });
 
+  /**
+   * Retention (S09): computed ON READ. Fetch the project's recent events (the big scan) and compute the cohort
+   * grid in memory (the small output). Deliberately not materialized — analysts want it fresh (ADR-0008).
+   */
+  app.post<{ Body: unknown }>("/insights/retention", async (req, reply): Promise<RetentionResult | undefined> => {
+    const body = RetentionBody.parse(req.body);
+    if (!opts.chEvents) {
+      void reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Event source not wired" } });
+      return undefined;
+    }
+    let events = await opts.chEvents(body.projectId, body.spec.days);
+    // Cohort filter (S09): the same membership resolver every query path shares.
+    if (body.cohort && opts.cohortMembers) {
+      const members = await opts.cohortMembers(body.cohort, body.projectId);
+      events = events.filter((e) => members.has(e.personId ?? e.distinctId));
+    }
+    return computeRetention(events, body.spec);
+  });
+
   /** Funnel query (S08): ordered-step conversion via ClickHouse windowFunnel(). */
   app.post<{ Body: unknown }>("/insights/funnel", async (req, reply) => {
     const body = z.object({ projectId: z.string().min(1).default("demo-project"), spec: FunnelSpecSchema }).parse(req.body);
@@ -232,6 +283,18 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "ClickHouse funnel backend not wired" } });
     }
     return opts.chFunnel(body.spec, body.projectId);
+  });
+
+  /** Create a cohort (S09) — one AST for property or behavioral. */
+  app.post<{ Body: unknown }>("/cohorts", async (req, reply) => {
+    const body = CohortBody.parse(req.body);
+    const row = await createCohort(body.projectId, body.name, body.definition);
+    return reply.code(201).send({ id: row.id, kind: body.definition.kind });
+  });
+
+  /** List cohorts with their staleness (membersComputedAt) for the analyst UI. */
+  app.get<{ Querystring: { projectId?: string } }>("/cohorts", async (req) => {
+    return listCohorts(req.query.projectId ?? "demo-project");
   });
 
   /** Save an insight — the query DEFINITION, versioned, not its results. */
