@@ -148,6 +148,22 @@ model ShareToken {
   @@index([dashboardId])
 }
 
+// GDPR deletion-request ledger (S13): the compliance evidence trail. One row per erasure request with its
+// outcome — so "we deleted this person" is provable months later, not just asserted. `remaining` must be 0 for
+// a completed request; a non-zero count marks the sweep failed and demands a re-run.
+model DeletionRequest {
+  id          String    @id @default(cuid())
+  personId    String
+  status      String    @default("pending") // pending | completed | failed
+  distinctIds String[]
+  rowsDeleted Int?
+  remaining   Int?
+  requestedAt DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([personId])
+}
+
 // A cohort (S09): a named set of people, defined by ONE AST (property predicate or behavioral: did event X ≥ N
 // times in a window). Property cohorts compile live; behavioral cohorts are materialized into CohortMembership
 // by a scheduled job, with `membersComputedAt` as the staleness contract shown to analysts (ADR-0008).

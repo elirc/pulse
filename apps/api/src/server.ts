@@ -52,6 +52,7 @@ import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
 import { createShareToken, resolveShareToken, revokeShareToken } from "./share";
+import { executePersonDeletion, type DeletionPorts } from "./deletion";
 import { TailHub } from "./tail";
 import { OnlineWindow } from "./online";
 import { randomUUID } from "node:crypto";
@@ -113,6 +114,8 @@ export interface ApiServerOptions {
   cacheStore?: CacheStore;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
   readFromClickhouse?: boolean;
+  /** GDPR deletion ports (S13) — metadata/CH/cache delete + verify + ledger. Absent → the endpoint 503s. */
+  deletionPorts?: DeletionPorts;
 }
 
 const IssueKeyBody = z.object({
@@ -477,6 +480,37 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       return reply.code(200).send({ revoked });
     },
   );
+
+  /**
+   * GDPR deletion (S13) — the data-subject's right to erasure. Deletion in an append-only store is a background
+   * sweep across EVERY copy (events, metadata, cohorts, caches) with a count-to-zero verification, recorded in a
+   * ledger for compliance evidence. Requires a session (a human, accountable action).
+   */
+  app.post<{ Params: { personId: string } }>(
+    "/gdpr/persons/:personId/delete",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      if (!opts.deletionPorts) {
+        return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Deletion pipeline not wired" } });
+      }
+      const result = await executePersonDeletion(req.params.personId, opts.deletionPorts);
+      // 202: the request is recorded and the sweep has run; a failed verification surfaces in the ledger.
+      return reply.code(202).send(result);
+    },
+  );
+
+  /** Deletion-request ledger (S13) — compliance evidence: prove a deletion happened, months later. */
+  app.get("/gdpr/deletions", { preHandler: requireSession }, async (_req, reply) => {
+    if (!opts.deletionPorts) return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Deletion pipeline not wired" } });
+    return { deletions: await opts.deletionPorts.ledger.list() };
+  });
+
+  app.get<{ Params: { id: string } }>("/gdpr/deletions/:id", { preHandler: requireSession }, async (req, reply) => {
+    if (!opts.deletionPorts) return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Deletion pipeline not wired" } });
+    const row = await opts.deletionPorts.ledger.get(req.params.id);
+    if (!row) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "No such deletion request" } });
+    return row;
+  });
 
   /** A dashboard with its tiles (for rendering). */
   app.get<{ Params: { dashboardId: string } }>("/dashboards/:dashboardId", async (req, reply) => {
