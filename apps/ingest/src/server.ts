@@ -4,7 +4,7 @@ import { z, ZodError } from "zod";
 import { randomUUID } from "node:crypto";
 import { PrismaKeyStore } from "@pulse/db";
 import { CachedKeyResolver, originAllowed } from "@pulse/auth";
-import { EventInputSchema, eventTime, type QueuedEvent } from "@pulse/shared";
+import { EventInputSchema, resolveEventTime, type QueuedEvent } from "@pulse/shared";
 import type { StreamProducer } from "@pulse/stream";
 import { env } from "./env";
 
@@ -100,15 +100,20 @@ export function buildIngestServer(opts: IngestServerOptions): FastifyInstance {
     }
 
     const inputs = Array.isArray(req.body) ? BatchSchema.parse(req.body) : [EventInputSchema.parse(req.body)];
-    const now = new Date().toISOString();
+    const nowDate = new Date();
+    const now = nowDate.toISOString();
     for (const input of inputs) {
+      // Timestamp policy (S13, harvests flaw #3): server ingestedAt is authoritative; the client ts is trusted
+      // only within a ±48h skew window and otherwise clamped to the boundary and flagged with `$ts_clamped`.
+      const resolvedTime = resolveEventTime(input.ts, nowDate);
+      const props = resolvedTime.clamped ? { ...input.props, $ts_clamped: true } : input.props;
       const queued: QueuedEvent = {
         uuid: input.uuid ?? randomUUID(), // prefer the SDK's client-minted id; mint one if a raw caller omitted it
         projectId: resolved.projectId,
         distinctId: input.distinctId,
         name: input.name,
-        props: input.props,
-        ts: eventTime(input.ts).toISOString(), // client clock still trusted here (flaw territory, S13)
+        props,
+        ts: resolvedTime.ts.toISOString(),
         ingestedAt: now,
       };
       await stream.add(queued);
