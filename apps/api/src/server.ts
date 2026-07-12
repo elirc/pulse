@@ -51,6 +51,8 @@ import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
+import { createFlag, listFlags, flagPayload } from "./flags";
+import { FlagSpecSchema } from "@pulse/flags";
 import { createShareToken, resolveShareToken, revokeShareToken } from "./share";
 import { executePersonDeletion, type DeletionPorts } from "./deletion";
 import { TailHub } from "./tail";
@@ -62,6 +64,11 @@ const CohortBody = zod.object({
   projectId: zod.string().min(1).default("demo-project"),
   name: zod.string().min(1).max(200),
   definition: CohortSpecSchema,
+});
+
+const FlagBody = zod.object({
+  projectId: zod.string().min(1).default("demo-project"),
+  spec: FlagSpecSchema,
 });
 
 /** Operational metrics for the ingestion pipeline — the numbers become an operational surface (S15 alerts here). */
@@ -569,6 +576,26 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   /** List cohorts with their staleness (membersComputedAt) for the analyst UI. */
   app.get<{ Querystring: { projectId?: string } }>("/cohorts", async (req) => {
     return listCohorts(req.query.projectId ?? "demo-project");
+  });
+
+  /** Create a feature flag (S14) — variants + rollout % + targeting predicate (reuses the cohort AST). */
+  app.post<{ Body: unknown }>("/flags", { preHandler: requireSession }, async (req, reply) => {
+    const body = FlagBody.parse(req.body);
+    const row = await createFlag(body.projectId, body.spec);
+    return reply.code(201).send({ id: row.id, key: row.key });
+  });
+
+  /** List flags for a project. */
+  app.get<{ Querystring: { projectId?: string } }>("/flags", async (req) => {
+    return listFlags(req.query.projectId ?? "demo-project");
+  });
+
+  /**
+   * Flag payload for the SDK (S14): every flag definition for a project. The SDK evaluates these LOCALLY by
+   * deterministic bucketing — no network per flag check, no assignment stored. Read via a write key in prod.
+   */
+  app.get<{ Querystring: { projectId?: string } }>("/flags/payload", async (req) => {
+    return { flags: await flagPayload(req.query.projectId ?? "demo-project") };
   });
 
   /** Save an insight — the query DEFINITION, versioned, not its results. */
