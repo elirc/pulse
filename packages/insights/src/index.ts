@@ -14,4 +14,5 @@ export * from "./compute";
 export * from "./sql";
 export * from "./sql-clickhouse";
 export * from "./rollup";
+export * from "./cardinality-guard";
 export * from "./pivot";

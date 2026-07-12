@@ -10,6 +10,7 @@ import {
   foldTopNRows,
   computeRetention,
   routeTrend,
+  cardinalityGuard,
   UNIQ_RELATIVE_ERROR,
   type FlatRow,
   type TrendSpec,
@@ -82,6 +83,8 @@ export interface ApiServerOptions {
   chEvents?: EventFetcher;
   /** Resolve a cohort's members (S09) — property live / behavioral materialized. Used to filter any query. */
   cohortMembers?: (cohortId: string, projectId: string) => Promise<Set<string>>;
+  /** Approximate distinct count of a property (S12) — from the cardinality tracker; powers the guard. */
+  cardinalityOf?: (property: string, projectId: string) => Promise<number>;
   /** Tile result cache store (S10) — Redis in prod, in-memory in tests. */
   cacheStore?: CacheStore;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
@@ -253,11 +256,22 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
 
   app.post<{ Body: unknown }>("/insights/trend", async (req, reply) => {
     const body = TrendBody.parse(req.body);
+    let spec = body.spec;
+    const projectId = body.projectId;
+    // Cardinality guard (S12): a breakdown on a high-cardinality property is forced to a small top-N + Other,
+    // with a notice header, so a chart never tries to render thousands of series.
+    if (spec.breakdown && opts.cardinalityOf) {
+      const distinct = await opts.cardinalityOf(spec.breakdown, projectId);
+      const guard = cardinalityGuard(spec.breakdown, distinct, spec.topN);
+      if (guard.guarded) {
+        spec = { ...spec, topN: guard.effectiveTopN };
+        void reply.header("x-cardinality-notice", guard.notice ?? "");
+      }
+    }
     // Read cutover (S07): serve from ClickHouse once the flag flips; Postgres until then.
     const runner = opts.readFromClickhouse && opts.chTrend ? opts.chTrend : runTrendPg;
-    // Transparent-routing debug header (S12): which path served this query, so a routed query is auditable.
-    void reply.header("x-served-by", opts.readFromClickhouse && opts.chTrend ? routeTrend(body.spec) : "postgres");
-    return runner(body.spec, body.projectId);
+    void reply.header("x-served-by", opts.readFromClickhouse && opts.chTrend ? routeTrend(spec) : "postgres");
+    return runner(spec, projectId);
   });
 
   /**
