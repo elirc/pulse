@@ -318,6 +318,32 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     return opts.chFunnel(body.spec, body.projectId);
   });
 
+  /** Create a dashboard (S10). */
+  app.post<{ Body: unknown }>("/dashboards", async (req, reply) => {
+    const body = zod.object({ projectId: zod.string().min(1).default("demo-project"), name: zod.string().min(1).max(200) }).parse(req.body);
+    const row = await prisma.dashboard.create({ data: { projectId: body.projectId, name: body.name }, select: { id: true } });
+    return reply.code(201).send({ id: row.id });
+  });
+
+  /** Add a tile (an insight ref + grid position) to a dashboard. */
+  app.post<{ Params: { dashboardId: string }; Body: unknown }>("/dashboards/:dashboardId/tiles", async (req, reply) => {
+    const body = zod
+      .object({ insightId: zod.string().min(1), x: zod.number().int().default(0), y: zod.number().int().default(0), w: zod.number().int().default(4), h: zod.number().int().default(3) })
+      .parse(req.body);
+    const row = await prisma.dashboardTile.create({ data: { dashboardId: req.params.dashboardId, ...body }, select: { id: true } });
+    return reply.code(201).send({ id: row.id });
+  });
+
+  /** A dashboard with its tiles (for rendering). */
+  app.get<{ Params: { dashboardId: string } }>("/dashboards/:dashboardId", async (req, reply) => {
+    const dash = await prisma.dashboard.findUnique({
+      where: { id: req.params.dashboardId },
+      select: { id: true, name: true, tiles: { select: { id: true, insightId: true, x: true, y: true, w: true, h: true } } },
+    });
+    if (!dash) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Dashboard not found" } });
+    return dash;
+  });
+
   /** Create a cohort (S09) — one AST for property or behavioral. */
   app.post<{ Body: unknown }>("/cohorts", async (req, reply) => {
     const body = CohortBody.parse(req.body);
