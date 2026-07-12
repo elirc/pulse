@@ -52,6 +52,7 @@ import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
 import { createFlag, listFlags, flagPayload } from "./flags";
+import { createExperiment, listExperiments, setExperimentStatus } from "./experiments";
 import { FlagSpecSchema } from "@pulse/flags";
 import { createShareToken, resolveShareToken, revokeShareToken } from "./share";
 import { executePersonDeletion, type DeletionPorts } from "./deletion";
@@ -69,6 +70,14 @@ const CohortBody = zod.object({
 const FlagBody = zod.object({
   projectId: zod.string().min(1).default("demo-project"),
   spec: FlagSpecSchema,
+});
+
+const ExperimentBody = zod.object({
+  projectId: zod.string().min(1).default("demo-project"),
+  flagKey: zod.string().min(1),
+  name: zod.string().min(1).max(200),
+  hypothesis: zod.string().min(1).max(2000), // required — scientific hygiene (state it before you look)
+  goalEvent: zod.string().min(1).max(200),
 });
 
 /** Operational metrics for the ingestion pipeline — the numbers become an operational surface (S15 alerts here). */
@@ -597,6 +606,31 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   app.get<{ Querystring: { projectId?: string } }>("/flags/payload", async (req) => {
     return { flags: await flagPayload(req.query.projectId ?? "demo-project") };
   });
+
+  /** Create an experiment (S14) — flag-linked, with a REQUIRED hypothesis and a goal event. */
+  app.post<{ Body: unknown }>("/experiments", { preHandler: requireSession }, async (req, reply) => {
+    const body = ExperimentBody.parse(req.body);
+    const res = await createExperiment(body.projectId, body);
+    if ("error" in res) return reply.code(400).send({ error: { code: "BAD_REQUEST", message: res.error } });
+    return reply.code(201).send({ id: res.id });
+  });
+
+  /** List experiments for a project. */
+  app.get<{ Querystring: { projectId?: string } }>("/experiments", async (req) => {
+    return listExperiments(req.query.projectId ?? "demo-project");
+  });
+
+  /** Start / stop an experiment (S14) — draft → running → stopped, one-way. */
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/experiments/:id/status",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      const { status } = zod.object({ status: zod.enum(["running", "stopped"]) }).parse(req.body);
+      const res = await setExperimentStatus(req.params.id, status);
+      if ("error" in res) return reply.code(400).send({ error: { code: "BAD_REQUEST", message: res.error } });
+      return reply.code(200).send({ ok: true });
+    },
+  );
 
   /** Save an insight — the query DEFINITION, versioned, not its results. */
   app.post<{ Body: unknown }>("/insights", async (req, reply) => {
