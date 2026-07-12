@@ -18,13 +18,24 @@ interface TailFrame {
   dropped: number;
 }
 
+const field: React.CSSProperties = { background: "#0d1117", border: "1px solid #232a32", borderRadius: 6, color: "#e6edf3", padding: "4px 8px", fontSize: 12 };
+
 export function Live(): JSX.Element {
   const [events, setEvents] = useState<TailEvent[]>([]);
   const [dropped, setDropped] = useState(0);
   const [connected, setConnected] = useState(false);
+  const [eventFilter, setEventFilter] = useState("");
+  const [personFilter, setPersonFilter] = useState("");
+  // Applied filters (reconnect the stream on Apply) — the predicate runs SERVER-side, so a filtered tail sends
+  // only matching events over the wire instead of shipping everything and filtering in the browser.
+  const [applied, setApplied] = useState({ event: "", distinctId: "" });
 
   useEffect(() => {
-    const es = new EventSource(`${BASE}/events/tail`);
+    const qs = new URLSearchParams();
+    if (applied.event) qs.set("event", applied.event);
+    if (applied.distinctId) qs.set("distinctId", applied.distinctId);
+    setEvents([]);
+    const es = new EventSource(`${BASE}/events/tail?${qs.toString()}`);
     es.onopen = () => setConnected(true);
     es.onerror = () => setConnected(false);
     es.onmessage = (msg) => {
@@ -33,7 +44,7 @@ export function Live(): JSX.Element {
       if (frame.events.length) setEvents((prev) => [...frame.events.reverse(), ...prev].slice(0, 100));
     };
     return () => es.close();
-  }, []);
+  }, [applied]);
 
   return (
     <section>
@@ -42,6 +53,13 @@ export function Live(): JSX.Element {
         Streaming (SSE) {connected ? "· connected" : "· connecting…"}
         {dropped > 0 && <span style={{ color: "#f2a154" }}> · {dropped} skipped (slow connection)</span>}
       </p>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <input style={field} value={eventFilter} onChange={(e) => setEventFilter(e.target.value)} placeholder="filter event" />
+        <input style={field} value={personFilter} onChange={(e) => setPersonFilter(e.target.value)} placeholder="filter distinctId" />
+        <button onClick={() => setApplied({ event: eventFilter, distinctId: personFilter })} style={{ ...field, color: "#f2545b", cursor: "pointer" }}>
+          Apply
+        </button>
+      </div>
       {events.length === 0 && <p style={{ color: "#8b93a1" }}>Waiting for events — fire one from the SDK or loadgen.</p>}
       {events.length > 0 && (
         <div style={{ overflowX: "auto" }}>
