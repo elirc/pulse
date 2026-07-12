@@ -63,6 +63,7 @@ export function App(): JSX.Element {
   return (
     <main style={{ maxWidth: 720, margin: "40px auto", padding: "0 16px", fontFamily: "system-ui, sans-serif", color: "#e6edf3" }}>
       <h1 style={{ color: "#f2545b" }}>Pulse</h1>
+      <QuotaBanner />
       <nav style={{ display: "flex", gap: 16, borderBottom: "1px solid #232a32", marginBottom: 24 }}>
         {tab("insights", "Events per day")}
         {tab("dashboard", "Dashboard")}
@@ -106,5 +107,42 @@ export function App(): JSX.Element {
         </>
       )}
     </main>
+  );
+}
+
+interface QuotaUsage {
+  used: number;
+  allowance: number;
+  ratio: number;
+  state: "ok" | "soft" | "hard";
+}
+
+/**
+ * Soft-limit banner (S15). Reads /ops/usage (metered from the pipeline's own accepted counts) and warns as a
+ * project approaches its allowance — a warning they can act on, not a cliff-edge cutoff. Silent when ok/unwired.
+ */
+function QuotaBanner(): JSX.Element | null {
+  const [usage, setUsage] = useState<QuotaUsage | null>(null);
+  useEffect(() => {
+    apiGet<QuotaUsage>("/ops/usage").then(setUsage).catch(() => setUsage(null));
+  }, []);
+  if (!usage || usage.state === "ok") return null;
+  const hard = usage.state === "hard";
+  return (
+    <div
+      style={{
+        background: hard ? "#3a1113" : "#3a2a11",
+        border: `1px solid ${hard ? "#f2545b" : "#f2a154"}`,
+        borderRadius: 8,
+        padding: "8px 12px",
+        marginBottom: 16,
+        fontSize: 13,
+        color: hard ? "#f2545b" : "#f2a154",
+      }}
+    >
+      {hard
+        ? `Monthly event allowance exhausted (${usage.used.toLocaleString()} / ${usage.allowance.toLocaleString()}). New events are being rejected — upgrade to resume ingestion.`
+        : `Approaching your monthly allowance: ${Math.round(usage.ratio * 100)}% used (${usage.used.toLocaleString()} / ${usage.allowance.toLocaleString()}).`}
+    </div>
   );
 }

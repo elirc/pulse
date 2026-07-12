@@ -18,6 +18,8 @@ const EnvSchema = z.object({
   // S12 query-cost guards.
   MAX_QUERY_CONCURRENCY: z.coerce.number().default(4), // per-project in-flight query cap
   MAX_QUERY_SECONDS: z.coerce.number().default(30), // ClickHouse max_execution_time — kill runaway scans
+  // S15 per-project monthly event allowance (metering dashboard reads it; ingest enforces it).
+  QUOTA_MONTHLY_ALLOWANCE: z.coerce.number().default(100_000_000),
 });
 
 export const env = EnvSchema.parse(process.env);
