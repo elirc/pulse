@@ -6,6 +6,7 @@ import { Insights } from "./Insights";
 import { Funnels } from "./Funnels";
 import { Retention } from "./Retention";
 import { Dashboard } from "./Dashboard";
+import { WebAnalytics } from "./WebAnalytics";
 import { Live } from "./Live";
 import { Persons } from "./Persons";
 
@@ -14,7 +15,7 @@ interface DailyCount {
   count: number;
 }
 
-type View = "insights" | "dashboard" | "trends" | "funnels" | "retention" | "live" | "persons" | "setup" | "docs";
+type View = "insights" | "dashboard" | "trends" | "funnels" | "retention" | "web" | "live" | "persons" | "setup" | "docs";
 
 /**
  * The analyst shell (S01). One insight — a daily-count line chart over the event firehose — rendered from
@@ -67,6 +68,7 @@ export function App(): JSX.Element {
         {tab("trends", "Insights")}
         {tab("funnels", "Funnels")}
         {tab("retention", "Retention")}
+        {tab("web", "Web")}
         {tab("live", "Live")}
         {tab("persons", "Persons")}
         {tab("setup", "Setup")}
@@ -76,6 +78,7 @@ export function App(): JSX.Element {
       {view === "trends" && <Insights />}
       {view === "funnels" && <Funnels />}
       {view === "retention" && <Retention />}
+      {view === "web" && <WebAnalytics />}
       {view === "live" && <Live />}
       {view === "persons" && <Persons />}
       {view === "docs" && <Docs />}
