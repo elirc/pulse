@@ -105,6 +105,45 @@ model Insight {
   @@index([projectId])
 }
 
+// Dashboards (S10): a grid of tiles, each referencing a saved Insight. ShareToken makes a dashboard publicly
+// readable without a session — a random token, hashed at rest like an API key.
+model Dashboard {
+  id        String          @id @default(cuid())
+  projectId String
+  name      String
+  createdAt DateTime        @default(now())
+  tiles     DashboardTile[]
+  shares    ShareToken[]
+
+  @@index([projectId])
+}
+
+model DashboardTile {
+  id          String    @id @default(cuid())
+  dashboardId String
+  insightId   String // the saved Insight this tile renders
+  x           Int       @default(0)
+  y           Int       @default(0)
+  w           Int       @default(4)
+  h           Int       @default(3)
+  dashboard   Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
+
+  @@index([dashboardId])
+}
+
+// A public share token for a dashboard (S10). Stored as a hash + prefix (Stripe-shaped, like ApiKey).
+// NOTE (S10): no expiry, no revocation list yet — revisited in S13 hardening.
+model ShareToken {
+  id          String    @id @default(cuid())
+  dashboardId String
+  hash        String    @unique
+  prefix      String
+  createdAt   DateTime  @default(now())
+  dashboard   Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
+
+  @@index([dashboardId])
+}
+
 // A cohort (S09): a named set of people, defined by ONE AST (property predicate or behavioral: did event X ≥ N
 // times in a window). Property cohorts compile live; behavioral cohorts are materialized into CohortMembership
 // by a scheduled job, with `membersComputedAt` as the staleness contract shown to analysts (ADR-0008).

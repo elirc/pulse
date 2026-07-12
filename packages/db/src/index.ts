@@ -18,5 +18,8 @@ export type {
   DistinctIdMapping,
   Cohort,
   CohortMembership,
+  Dashboard,
+  DashboardTile,
+  ShareToken,
 } from "@prisma/client";
 export { PrismaKeyStore } from "./keystore";
