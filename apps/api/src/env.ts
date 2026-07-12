@@ -15,6 +15,9 @@ const EnvSchema = z.object({
   CLICKHOUSE_URL: z.string().default("http://localhost:8123"),
   CLICKHOUSE_DB: z.string().default("pulse"),
   READ_FROM_CH: z.coerce.boolean().default(false), // read cutover: serve trends from ClickHouse
+  // S12 query-cost guards.
+  MAX_QUERY_CONCURRENCY: z.coerce.number().default(4), // per-project in-flight query cap
+  MAX_QUERY_SECONDS: z.coerce.number().default(30), // ClickHouse max_execution_time — kill runaway scans
 });
 
 export const env = EnvSchema.parse(process.env);

@@ -9,6 +9,9 @@ import {
   compileTrendSql,
   foldTopNRows,
   computeRetention,
+  routeTrend,
+  cardinalityGuard,
+  summarizeSampled,
   UNIQ_RELATIVE_ERROR,
   type FlatRow,
   type TrendSpec,
@@ -34,7 +37,15 @@ const RetentionBody = zod.object({
     days: zod.number().int().min(1).max(365).default(56),
   }),
 });
-import { canonicalHash, ResultCache, InMemoryCacheStore, type CacheStore, type DailyCount } from "@pulse/shared";
+import {
+  canonicalHash,
+  ResultCache,
+  InMemoryCacheStore,
+  ConcurrencyLimiter,
+  ConcurrencyLimitError,
+  type CacheStore,
+  type DailyCount,
+} from "@pulse/shared";
 import { env } from "./env";
 import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
@@ -59,6 +70,15 @@ export interface IngestOps {
   dlqDepth(): Promise<number>;
 }
 
+/** One query's cost record (S12): what it was, how long it took, and whether it was sampled or rejected. */
+export interface QueryCostEvent {
+  projectId: string;
+  route: string;
+  durationMs: number;
+  sampled: boolean;
+  rejected?: boolean;
+}
+
 /** Runs a compiled trend query against a backend, returning flat rows. */
 export type TrendRunner = (spec: TrendSpec, projectId: string) => Promise<FlatRow[]>;
 /** Runs a funnel against a backend (ClickHouse windowFunnel), returning the funnel result. */
@@ -75,12 +95,20 @@ export interface ApiServerOptions {
   onlineWindow?: OnlineWindow;
   /** ClickHouse trend backend (S07). When present + readFromClickhouse, trends read CH; verify runs both. */
   chTrend?: TrendRunner;
+  /** Sampled trend backend (S12) — runs the trend with SAMPLE {rate}; the endpoint scales + CIs the rows. */
+  chTrendSampled?: (spec: TrendSpec, projectId: string, sampleRate: number) => Promise<FlatRow[]>;
   /** ClickHouse funnel backend (S08). Funnels run as windowFunnel() queries. */
   chFunnel?: FunnelRunner;
   /** Event fetcher for retention (S09) — the big scan retention reads, then the grid is computed in-memory. */
   chEvents?: EventFetcher;
   /** Resolve a cohort's members (S09) — property live / behavioral materialized. Used to filter any query. */
   cohortMembers?: (cohortId: string, projectId: string) => Promise<Set<string>>;
+  /** Approximate distinct count of a property (S12) — from the cardinality tracker; powers the guard. */
+  cardinalityOf?: (property: string, projectId: string) => Promise<number>;
+  /** Per-project query concurrency cap (S12). Over the cap → 429 + Retry-After instead of pinning the cluster. */
+  queryLimiter?: ConcurrencyLimiter;
+  /** Sink for per-query cost telemetry (S12) — duration, route, sampled/rejected. Log/metrics in prod. */
+  onQueryCost?: (e: QueryCostEvent) => void;
   /** Tile result cache store (S10) — Redis in prod, in-memory in tests. */
   cacheStore?: CacheStore;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
@@ -95,7 +123,12 @@ const IssueKeyBody = z.object({
 const TrendBody = z.object({
   projectId: z.string().min(1).default("demo-project"),
   spec: TrendSpecSchema,
+  /** Opt-in interactive sampling (S12): read a 10% SAMPLE and return estimates + CIs, un-sampling if too thin. */
+  sample: z.boolean().default(false),
 });
+
+/** Interactive sample fraction (S12). 10% is ~10x cheaper; the CI tells the analyst what it cost in precision. */
+const INTERACTIVE_SAMPLE_RATE = 0.1;
 
 const SaveInsightBody = z.object({
   projectId: z.string().min(1).default("demo-project"),
@@ -250,11 +283,63 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     return spec.breakdown ? foldTopNRows(flat, spec.topN) : flat;
   };
 
-  app.post<{ Body: unknown }>("/insights/trend", async (req) => {
+  app.post<{ Body: unknown }>("/insights/trend", async (req, reply) => {
     const body = TrendBody.parse(req.body);
+    let spec = body.spec;
+    const projectId = body.projectId;
+    // Cardinality guard (S12): a breakdown on a high-cardinality property is forced to a small top-N + Other,
+    // with a notice header, so a chart never tries to render thousands of series.
+    if (spec.breakdown && opts.cardinalityOf) {
+      const distinct = await opts.cardinalityOf(spec.breakdown, projectId);
+      const guard = cardinalityGuard(spec.breakdown, distinct, spec.topN);
+      if (guard.guarded) {
+        spec = { ...spec, topN: guard.effectiveTopN };
+        void reply.header("x-cardinality-notice", guard.notice ?? "");
+      }
+    }
     // Read cutover (S07): serve from ClickHouse once the flag flips; Postgres until then.
-    const runner = opts.readFromClickhouse && opts.chTrend ? opts.chTrend : runTrendPg;
-    return runner(body.spec, body.projectId);
+    const onClickhouse = Boolean(opts.readFromClickhouse && opts.chTrend);
+    // The actual query work, wrapped below by the per-project concurrency guard + cost logging.
+    const produce = async (): Promise<unknown> => {
+      // Interactive sampling (S12): opt-in, ClickHouse-only. Run a 10% SAMPLE, scale + CI the rows, and if the
+      // whole result came back too thin to trust, transparently un-sample and re-run exact. The response carries
+      // the estimates and confidence so the UI can render "~12,400 ±3%" instead of a fake-precise number.
+      if (body.sample && onClickhouse && opts.chTrendSampled) {
+        const raw = await opts.chTrendSampled(spec, projectId, INTERACTIVE_SAMPLE_RATE);
+        const summary = summarizeSampled(raw, INTERACTIVE_SAMPLE_RATE);
+        if (summary.reliable) {
+          void reply.header("x-served-by", routeTrend(spec));
+          void reply.header("x-sampled", String(INTERACTIVE_SAMPLE_RATE));
+          return { sampled: true, sampleRate: INTERACTIVE_SAMPLE_RATE, rows: summary.rows };
+        }
+        // Too thin — un-sample and run exact. The analyst asked for speed but the sample couldn't deliver signal.
+        const exact = await opts.chTrend!(spec, projectId);
+        void reply.header("x-served-by", routeTrend(spec));
+        void reply.header("x-sampled", "unsampled");
+        return { sampled: false, rows: exact.map((r) => ({ ...r, ci95: 0, reliable: true })) };
+      }
+      const runner = onClickhouse ? opts.chTrend! : runTrendPg;
+      void reply.header("x-served-by", onClickhouse ? routeTrend(spec) : "postgres");
+      return runner(spec, projectId);
+    };
+
+    // Query cost guards (S12): cap concurrent queries per project so one tenant can't pin the cluster, and log
+    // every query's cost. Over the cap → 429 + Retry-After (fail fast; a query nobody's waiting for is waste).
+    const started = Date.now();
+    try {
+      const result = opts.queryLimiter ? await opts.queryLimiter.run(projectId, produce) : await produce();
+      opts.onQueryCost?.({ projectId, route: "trend", durationMs: Date.now() - started, sampled: body.sample });
+      return result;
+    } catch (e) {
+      if (e instanceof ConcurrencyLimitError) {
+        opts.onQueryCost?.({ projectId, route: "trend", durationMs: Date.now() - started, sampled: body.sample, rejected: true });
+        return reply
+          .code(429)
+          .header("retry-after", "1")
+          .send({ error: "too_many_concurrent_queries", limit: e.limit });
+      }
+      throw e;
+    }
   });
 
   /**

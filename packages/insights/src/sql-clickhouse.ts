@@ -23,6 +23,8 @@ export interface ChCompileOptions {
   exact?: boolean;
   /** Restrict to a cohort's members (S09): the resolved personIds. Adds `AND person IN (…)`. */
   cohortMembers?: string[];
+  /** Sample fraction (S12): 0.1 = read a 10% sample. Adds `SAMPLE 0.1`; the caller scales + CIs the result. */
+  sampleRate?: number;
 }
 
 /** Relative error bound of ClickHouse `uniq()` (HyperLogLog), documented for the golden-parity tolerance. */
@@ -74,8 +76,10 @@ export function compileTrendClickhouse(
   }
   cols.push(`${metricExpr} AS value`);
 
+  // SAMPLE must sit right after the table name. The sample rate is a validated number, safe to inline.
+  const sample = opts.sampleRate && opts.sampleRate > 0 && opts.sampleRate < 1 ? ` SAMPLE ${opts.sampleRate}` : "";
   const text =
-    `SELECT ${cols.join(", ")} FROM events ` +
+    `SELECT ${cols.join(", ")} FROM events${sample} ` +
     `WHERE ${where.join(" AND ")} ` +
     `GROUP BY ${groupBy.join(", ")} ORDER BY 1`;
   return { text, params };

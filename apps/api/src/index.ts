@@ -1,12 +1,29 @@
 import Redis from "ioredis";
 import { createClient } from "@clickhouse/client";
 import { RedisEventStream, type RedisLike } from "@pulse/stream";
-import { compileTrendClickhouse, compileFunnelClickhouse, foldTopNRows, type FlatRow, type EventLike } from "@pulse/insights";
-import { buildApiServer, env, type IngestOps, type TrendRunner, type FunnelRunner, type EventFetcher } from "./server";
+import {
+  compileTrendClickhouse,
+  compileTrendRollup,
+  isRollupEligible,
+  compileFunnelClickhouse,
+  foldTopNRows,
+  type FlatRow,
+  type EventLike,
+  type TrendSpec,
+} from "@pulse/insights";
+import {
+  buildApiServer,
+  env,
+  type IngestOps,
+  type TrendRunner,
+  type FunnelRunner,
+  type EventFetcher,
+  type QueryCostEvent,
+} from "./server";
 import { resolveCohortMembers } from "./cohorts";
 import { TailHub } from "./tail";
 import { OnlineWindow, RedisSortedSetStore, type RedisZ } from "./online";
-import type { QueuedEvent } from "@pulse/shared";
+import { ConcurrencyLimiter, type QueuedEvent } from "@pulse/shared";
 
 // Wire ingestion metrics off Redis (not exercised in CI). streamDepth/dlqDepth are XLENs; consumerPending is
 // the group's pending-entries count.
@@ -42,13 +59,45 @@ void (async () => {
 
 // ClickHouse trend backend (S07): compile the same TrendSpec to CH SQL and run it. Used by /insights/trend/verify
 // always, and by /insights/trend once READ_FROM_CH flips.
-const ch = createClient({ url: env.CLICKHOUSE_URL, database: env.CLICKHOUSE_DB });
+// max_execution_time (S12): a hard server-side cap so a runaway scan can't hold a slot forever. Applied to every
+// analytical read; ClickHouse aborts the query at the limit rather than letting it consume the cluster.
+const ch = createClient({
+  url: env.CLICKHOUSE_URL,
+  database: env.CLICKHOUSE_DB,
+  clickhouse_settings: { max_execution_time: env.MAX_QUERY_SECONDS },
+});
 const chTrend: TrendRunner = async (spec, projectId) => {
-  const { text, params } = compileTrendClickhouse(spec, projectId);
+  // Transparent rollup routing (S12): eligible daily count/unique queries read the pre-aggregated rollup.
+  const { text, params } = isRollupEligible(spec)
+    ? compileTrendRollup(spec, projectId)
+    : compileTrendClickhouse(spec, projectId);
   const rs = await ch.query({ query: text, query_params: params, format: "JSONEachRow" });
   const rows = (await rs.json()) as Array<{ bucket: string; label?: string; value: string | number }>;
   const flat: FlatRow[] = rows.map((r) => ({ bucket: r.bucket, label: r.label ?? null, value: Number(r.value) }));
   return spec.breakdown ? foldTopNRows(flat, spec.topN) : flat;
+};
+
+// Sampled trend backend (S12): the same CH query with SAMPLE {rate}. Never routes to the rollup (rollups are
+// already exact and cheap; sampling is for the raw path). The endpoint scales the counts and attaches CIs.
+const chTrendSampled = async (spec: TrendSpec, projectId: string, sampleRate: number): Promise<FlatRow[]> => {
+  const { text, params } = compileTrendClickhouse(spec, projectId, { sampleRate });
+  const rs = await ch.query({ query: text, query_params: params, format: "JSONEachRow" });
+  const rows = (await rs.json()) as Array<{ bucket: string; label?: string; value: string | number }>;
+  const flat: FlatRow[] = rows.map((r) => ({ bucket: r.bucket, label: r.label ?? null, value: Number(r.value) }));
+  return spec.breakdown ? foldTopNRows(flat, spec.topN) : flat;
+};
+
+// Approximate distinct count of a property (S12): powers the cardinality guard. uniq() is a cheap HLL estimate.
+const cardinalityOf = async (property: string, projectId: string): Promise<number> => {
+  const rs = await ch.query({
+    query:
+      "SELECT uniq(JSONExtractString(props, {prop:String})) AS n FROM events " +
+      "WHERE projectId = {pid:String} AND ts >= now() - toIntervalDay(30)",
+    query_params: { prop: property, pid: projectId },
+    format: "JSONEachRow",
+  });
+  const rows = (await rs.json()) as Array<{ n: string | number }>;
+  return Number(rows[0]?.n ?? 0);
 };
 
 // ClickHouse funnel backend (S08): windowFunnel() → per-step counts → FunnelResult.
@@ -91,14 +140,28 @@ const chEvents: EventFetcher = async (projectId, days) => {
   }));
 };
 
+// Per-project concurrency cap + cost telemetry (S12). The limiter is in-memory per API instance; behind N
+// replicas the effective cap is N×, which is fine — it's a guardrail against a single tenant's runaway
+// dashboard, not a global quota. onQueryCost logs structured cost lines a metrics pipeline can scrape.
+const queryLimiter = new ConcurrencyLimiter(env.MAX_QUERY_CONCURRENCY);
+const onQueryCost = (e: QueryCostEvent): void => {
+  console.log(
+    JSON.stringify({ at: "query.cost", ...e }),
+  );
+};
+
 const app = buildApiServer({
   ingestOps,
   chTrend,
+  chTrendSampled,
+  cardinalityOf,
   chFunnel,
   chEvents,
   cohortMembers: resolveCohortMembers,
   tailHub,
   onlineWindow,
+  queryLimiter,
+  onQueryCost,
   readFromClickhouse: env.READ_FROM_CH,
 });
 app
