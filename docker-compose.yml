@@ -24,6 +24,22 @@ services:
       timeout: 3s
       retries: 10
 
+  # The columnar events store (S07). Metadata stays in Postgres; only events live here.
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    environment:
+      CLICKHOUSE_DB: pulse
+      CLICKHOUSE_USER: pulse
+      CLICKHOUSE_PASSWORD: pulse
+    ports: ["8123:8123", "9000:9000"]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   ingest:
     build: { context: ., dockerfile: apps/ingest/Dockerfile }
     environment:
