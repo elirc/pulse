@@ -41,6 +41,8 @@ import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
 import { createShareToken, resolveShareToken } from "./share";
+import { TailHub } from "./tail";
+import { randomUUID } from "node:crypto";
 import { CohortSpecSchema } from "@pulse/insights";
 
 const CohortBody = zod.object({
@@ -66,6 +68,8 @@ export interface ApiServerOptions {
   resolver?: CachedKeyResolver;
   /** Ingestion pipeline metrics source; wired to Redis in production, an in-memory fake in tests. */
   ingestOps?: IngestOps;
+  /** Live-tail fan-out hub (S11) — fed by a dedicated tail consumer group in the entry. */
+  tailHub?: TailHub;
   /** ClickHouse trend backend (S07). When present + readFromClickhouse, trends read CH; verify runs both. */
   chTrend?: TrendRunner;
   /** ClickHouse funnel backend (S08). Funnels run as windowFunnel() queries. */
@@ -124,6 +128,31 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   });
 
   app.get("/health", async () => ({ status: "ok" }));
+
+  /**
+   * Live event tail (S11): Server-Sent Events from a dedicated fan-out group (wired in the entry). Replaces the
+   * S05 raw-table polling feed. A slow client gets a bounded ring buffer that DROPS old frames (freshness >
+   * completeness) and reports the drop count — it never back-pressures the pipeline.
+   */
+  app.get<{ Querystring: { projectId?: string; event?: string; distinctId?: string } }>("/events/tail", (req, reply) => {
+    const hub = opts.tailHub;
+    if (!hub) {
+      void reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Live tail not wired" } });
+      return;
+    }
+    const id = randomUUID();
+    hub.subscribe(id, { projectId: req.query.projectId, event: req.query.event, distinctId: req.query.distinctId });
+    reply.hijack();
+    reply.raw.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    const timer = setInterval(() => {
+      const frame = hub.drain(id);
+      if (frame.events.length > 0 || frame.dropped > 0) reply.raw.write(`data: ${JSON.stringify(frame)}\n\n`);
+    }, 500);
+    req.raw.on("close", () => {
+      clearInterval(timer);
+      hub.unsubscribe(id);
+    });
+  });
 
   /**
    * Ingestion pipeline health (S04): stream backlog, consumer pending (in-flight, unacked), and DLQ size.
