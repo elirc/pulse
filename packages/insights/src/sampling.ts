@@ -38,3 +38,35 @@ export function estimateFromSample(observed: number, sampleRate: number): Sample
 export function formatEstimate(e: SampleEstimate): string {
   return `~${e.estimate.toLocaleString()} ±${Math.round(e.relativeCi * 100)}%`;
 }
+
+import type { FlatRow } from "./pivot";
+
+export interface SampledRow {
+  bucket: string;
+  label: string | null;
+  /** The scaled estimate (observed / sampleRate). */
+  value: number;
+  ci95: number;
+  reliable: boolean;
+}
+
+export interface SampledSummary {
+  rows: SampledRow[];
+  /** False when the TOTAL observed across the result is too thin — the caller should un-sample and run exact. */
+  reliable: boolean;
+}
+
+/**
+ * Turn raw sampled rows into estimates with CIs, and decide — at the whole-query level — whether the sample was
+ * thick enough to trust. A breakdown can have many small series; judging each in isolation would un-sample a
+ * chart just because one label is rare. We gate on the TOTAL observed instead: if the whole result is thin, the
+ * caller re-runs the query exact.
+ */
+export function summarizeSampled(rows: FlatRow[], sampleRate: number): SampledSummary {
+  const out: SampledRow[] = rows.map((r) => {
+    const e = estimateFromSample(r.value, sampleRate);
+    return { bucket: r.bucket, label: r.label, value: e.estimate, ci95: e.ci95, reliable: e.reliable };
+  });
+  const totalObserved = rows.reduce((s, r) => s + r.value, 0);
+  return { rows: out, reliable: totalObserved >= MIN_RELIABLE_OBSERVED };
+}

@@ -11,6 +11,7 @@ import {
   computeRetention,
   routeTrend,
   cardinalityGuard,
+  summarizeSampled,
   UNIQ_RELATIVE_ERROR,
   type FlatRow,
   type TrendSpec,
@@ -77,6 +78,8 @@ export interface ApiServerOptions {
   onlineWindow?: OnlineWindow;
   /** ClickHouse trend backend (S07). When present + readFromClickhouse, trends read CH; verify runs both. */
   chTrend?: TrendRunner;
+  /** Sampled trend backend (S12) — runs the trend with SAMPLE {rate}; the endpoint scales + CIs the rows. */
+  chTrendSampled?: (spec: TrendSpec, projectId: string, sampleRate: number) => Promise<FlatRow[]>;
   /** ClickHouse funnel backend (S08). Funnels run as windowFunnel() queries. */
   chFunnel?: FunnelRunner;
   /** Event fetcher for retention (S09) — the big scan retention reads, then the grid is computed in-memory. */
@@ -99,7 +102,12 @@ const IssueKeyBody = z.object({
 const TrendBody = z.object({
   projectId: z.string().min(1).default("demo-project"),
   spec: TrendSpecSchema,
+  /** Opt-in interactive sampling (S12): read a 10% SAMPLE and return estimates + CIs, un-sampling if too thin. */
+  sample: z.boolean().default(false),
 });
+
+/** Interactive sample fraction (S12). 10% is ~10x cheaper; the CI tells the analyst what it cost in precision. */
+const INTERACTIVE_SAMPLE_RATE = 0.1;
 
 const SaveInsightBody = z.object({
   projectId: z.string().min(1).default("demo-project"),
@@ -269,8 +277,26 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       }
     }
     // Read cutover (S07): serve from ClickHouse once the flag flips; Postgres until then.
-    const runner = opts.readFromClickhouse && opts.chTrend ? opts.chTrend : runTrendPg;
-    void reply.header("x-served-by", opts.readFromClickhouse && opts.chTrend ? routeTrend(spec) : "postgres");
+    const onClickhouse = Boolean(opts.readFromClickhouse && opts.chTrend);
+    // Interactive sampling (S12): opt-in, ClickHouse-only. Run a 10% SAMPLE, scale + CI the rows, and if the
+    // whole result came back too thin to trust, transparently un-sample and re-run exact. The response carries
+    // the estimates and confidence so the UI can render "~12,400 ±3%" instead of a fake-precise number.
+    if (body.sample && onClickhouse && opts.chTrendSampled) {
+      const raw = await opts.chTrendSampled(spec, projectId, INTERACTIVE_SAMPLE_RATE);
+      const summary = summarizeSampled(raw, INTERACTIVE_SAMPLE_RATE);
+      if (summary.reliable) {
+        void reply.header("x-served-by", routeTrend(spec));
+        void reply.header("x-sampled", String(INTERACTIVE_SAMPLE_RATE));
+        return { sampled: true, sampleRate: INTERACTIVE_SAMPLE_RATE, rows: summary.rows };
+      }
+      // Too thin — un-sample and run exact. The analyst asked for speed but the sample couldn't deliver signal.
+      const exact = await opts.chTrend!(spec, projectId);
+      void reply.header("x-served-by", routeTrend(spec));
+      void reply.header("x-sampled", "unsampled");
+      return { sampled: false, rows: exact.map((r) => ({ ...r, ci95: 0, reliable: true })) };
+    }
+    const runner = onClickhouse ? opts.chTrend! : runTrendPg;
+    void reply.header("x-served-by", onClickhouse ? routeTrend(spec) : "postgres");
     return runner(spec, projectId);
   });
 

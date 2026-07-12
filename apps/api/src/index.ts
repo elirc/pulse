@@ -9,6 +9,7 @@ import {
   foldTopNRows,
   type FlatRow,
   type EventLike,
+  type TrendSpec,
 } from "@pulse/insights";
 import { buildApiServer, env, type IngestOps, type TrendRunner, type FunnelRunner, type EventFetcher } from "./server";
 import { resolveCohortMembers } from "./cohorts";
@@ -62,6 +63,29 @@ const chTrend: TrendRunner = async (spec, projectId) => {
   return spec.breakdown ? foldTopNRows(flat, spec.topN) : flat;
 };
 
+// Sampled trend backend (S12): the same CH query with SAMPLE {rate}. Never routes to the rollup (rollups are
+// already exact and cheap; sampling is for the raw path). The endpoint scales the counts and attaches CIs.
+const chTrendSampled = async (spec: TrendSpec, projectId: string, sampleRate: number): Promise<FlatRow[]> => {
+  const { text, params } = compileTrendClickhouse(spec, projectId, { sampleRate });
+  const rs = await ch.query({ query: text, query_params: params, format: "JSONEachRow" });
+  const rows = (await rs.json()) as Array<{ bucket: string; label?: string; value: string | number }>;
+  const flat: FlatRow[] = rows.map((r) => ({ bucket: r.bucket, label: r.label ?? null, value: Number(r.value) }));
+  return spec.breakdown ? foldTopNRows(flat, spec.topN) : flat;
+};
+
+// Approximate distinct count of a property (S12): powers the cardinality guard. uniq() is a cheap HLL estimate.
+const cardinalityOf = async (property: string, projectId: string): Promise<number> => {
+  const rs = await ch.query({
+    query:
+      "SELECT uniq(JSONExtractString(props, {prop:String})) AS n FROM events " +
+      "WHERE projectId = {pid:String} AND ts >= now() - toIntervalDay(30)",
+    query_params: { prop: property, pid: projectId },
+    format: "JSONEachRow",
+  });
+  const rows = (await rs.json()) as Array<{ n: string | number }>;
+  return Number(rows[0]?.n ?? 0);
+};
+
 // ClickHouse funnel backend (S08): windowFunnel() → per-step counts → FunnelResult.
 const chFunnel: FunnelRunner = async (spec, projectId) => {
   const { text, params } = compileFunnelClickhouse(spec, projectId);
@@ -105,6 +129,8 @@ const chEvents: EventFetcher = async (projectId, days) => {
 const app = buildApiServer({
   ingestOps,
   chTrend,
+  chTrendSampled,
+  cardinalityOf,
   chFunnel,
   chEvents,
   cohortMembers: resolveCohortMembers,
