@@ -9,6 +9,7 @@ import {
   compileTrendSql,
   foldTopNRows,
   computeRetention,
+  routeTrend,
   UNIQ_RELATIVE_ERROR,
   type FlatRow,
   type TrendSpec,
@@ -250,10 +251,12 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     return spec.breakdown ? foldTopNRows(flat, spec.topN) : flat;
   };
 
-  app.post<{ Body: unknown }>("/insights/trend", async (req) => {
+  app.post<{ Body: unknown }>("/insights/trend", async (req, reply) => {
     const body = TrendBody.parse(req.body);
     // Read cutover (S07): serve from ClickHouse once the flag flips; Postgres until then.
     const runner = opts.readFromClickhouse && opts.chTrend ? opts.chTrend : runTrendPg;
+    // Transparent-routing debug header (S12): which path served this query, so a routed query is auditable.
+    void reply.header("x-served-by", opts.readFromClickhouse && opts.chTrend ? routeTrend(body.spec) : "postgres");
     return runner(body.spec, body.projectId);
   });
 

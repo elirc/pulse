@@ -1,7 +1,15 @@
 import Redis from "ioredis";
 import { createClient } from "@clickhouse/client";
 import { RedisEventStream, type RedisLike } from "@pulse/stream";
-import { compileTrendClickhouse, compileFunnelClickhouse, foldTopNRows, type FlatRow, type EventLike } from "@pulse/insights";
+import {
+  compileTrendClickhouse,
+  compileTrendRollup,
+  isRollupEligible,
+  compileFunnelClickhouse,
+  foldTopNRows,
+  type FlatRow,
+  type EventLike,
+} from "@pulse/insights";
 import { buildApiServer, env, type IngestOps, type TrendRunner, type FunnelRunner, type EventFetcher } from "./server";
 import { resolveCohortMembers } from "./cohorts";
 import { TailHub } from "./tail";
@@ -44,7 +52,10 @@ void (async () => {
 // always, and by /insights/trend once READ_FROM_CH flips.
 const ch = createClient({ url: env.CLICKHOUSE_URL, database: env.CLICKHOUSE_DB });
 const chTrend: TrendRunner = async (spec, projectId) => {
-  const { text, params } = compileTrendClickhouse(spec, projectId);
+  // Transparent rollup routing (S12): eligible daily count/unique queries read the pre-aggregated rollup.
+  const { text, params } = isRollupEligible(spec)
+    ? compileTrendRollup(spec, projectId)
+    : compileTrendClickhouse(spec, projectId);
   const rs = await ch.query({ query: text, query_params: params, format: "JSONEachRow" });
   const rows = (await rs.json()) as Array<{ bucket: string; label?: string; value: string | number }>;
   const flat: FlatRow[] = rows.map((r) => ({ bucket: r.bucket, label: r.label ?? null, value: Number(r.value) }));
