@@ -40,6 +40,7 @@ import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
+import { createShareToken } from "./share";
 import { CohortSpecSchema } from "@pulse/insights";
 
 const CohortBody = zod.object({
@@ -333,6 +334,16 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     const row = await prisma.dashboardTile.create({ data: { dashboardId: req.params.dashboardId, ...body }, select: { id: true } });
     return reply.code(201).send({ id: row.id });
   });
+
+  /** Create a public share token for a dashboard (S10) — shown once. Requires a session (a human action). */
+  app.post<{ Params: { dashboardId: string } }>(
+    "/dashboards/:dashboardId/share",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      const issued = await createShareToken(req.params.dashboardId);
+      return reply.code(201).send({ token: issued.token, prefix: issued.prefix, warning: "Shown once. Anyone with this link can view the dashboard." });
+    },
+  );
 
   /** A dashboard with its tiles (for rendering). */
   app.get<{ Params: { dashboardId: string } }>("/dashboards/:dashboardId", async (req, reply) => {
