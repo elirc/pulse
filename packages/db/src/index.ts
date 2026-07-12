@@ -6,5 +6,17 @@ export const prisma = globalForPrisma.prisma ?? new PrismaClient();
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 export { Prisma, ApiKeyType } from "@prisma/client";
-export type { Event, Org, User, Membership, Project, ApiKey, Insight, Person, DistinctIdMapping } from "@prisma/client";
+export type {
+  Event,
+  Org,
+  User,
+  Membership,
+  Project,
+  ApiKey,
+  Insight,
+  Person,
+  DistinctIdMapping,
+  Cohort,
+  CohortMembership,
+} from "@prisma/client";
 export { PrismaKeyStore } from "./keystore";

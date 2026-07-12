@@ -105,6 +105,32 @@ model Insight {
   @@index([projectId])
 }
 
+// A cohort (S09): a named set of people, defined by ONE AST (property predicate or behavioral: did event X ≥ N
+// times in a window). Property cohorts compile live; behavioral cohorts are materialized into CohortMembership
+// by a scheduled job, with `membersComputedAt` as the staleness contract shown to analysts (ADR-0008).
+model Cohort {
+  id               String             @id @default(cuid())
+  projectId        String
+  name             String
+  kind             String // "property" | "behavioral"
+  definition       Json // a CohortSpec (see @pulse/insights)
+  membersComputedAt DateTime? // behavioral only: when membership was last recomputed
+  createdAt        DateTime           @default(now())
+  members          CohortMembership[]
+
+  @@index([projectId])
+}
+
+// Materialized behavioral-cohort membership (one row per person in the cohort as of the last recompute).
+model CohortMembership {
+  cohortId String
+  personId String
+  cohort   Cohort @relation(fields: [cohortId], references: [id], onDelete: Cascade)
+
+  @@id([cohortId, personId])
+  @@index([personId])
+}
+
 // A credential's capability follows its audience. A WRITE key ships in public page source to strangers,
 // so it may only APPEND events; a SECRET key never leaves a server, so it may READ. The type is readable
 // from the plaintext prefix (pw_live_… / ps_live_…), stored so support can identify a key without ever
