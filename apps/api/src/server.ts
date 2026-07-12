@@ -34,12 +34,13 @@ const RetentionBody = zod.object({
     days: zod.number().int().min(1).max(365).default(56),
   }),
 });
-import type { DailyCount } from "@pulse/shared";
+import { canonicalHash, ResultCache, InMemoryCacheStore, type CacheStore, type DailyCount } from "@pulse/shared";
 import { env } from "./env";
 import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
+import { createShareToken, resolveShareToken } from "./share";
 import { CohortSpecSchema } from "@pulse/insights";
 
 const CohortBody = zod.object({
@@ -73,6 +74,8 @@ export interface ApiServerOptions {
   chEvents?: EventFetcher;
   /** Resolve a cohort's members (S09) — property live / behavioral materialized. Used to filter any query. */
   cohortMembers?: (cohortId: string, projectId: string) => Promise<Set<string>>;
+  /** Tile result cache store (S10) — Redis in prod, in-memory in tests. */
+  cacheStore?: CacheStore;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
   readFromClickhouse?: boolean;
 }
@@ -110,6 +113,7 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   void app.register(cors, { origin: env.WEB_URL });
 
   const resolver = opts.resolver ?? new CachedKeyResolver(new PrismaKeyStore());
+  const resultCache = new ResultCache(opts.cacheStore ?? new InMemoryCacheStore());
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) {
@@ -276,6 +280,36 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     return computeRetention(events, body.spec);
   });
 
+  /**
+   * A saved insight's CACHED result (S10) — a dashboard tile. Keyed on the query DEFINITION hash (not the URL),
+   * single-flight against the stampede, `computedAt` returned so the UI can show staleness. `?refresh=1` forces
+   * a recompute (the manual refresh button).
+   */
+  app.get<{ Params: { insightId: string }; Querystring: { refresh?: string } }>(
+    "/insights/:insightId/result",
+    async (req, reply) => {
+      const insight = await prisma.insight.findUnique({
+        where: { id: req.params.insightId },
+        select: { defKind: true, definition: true, defVersion: true, projectId: true },
+      });
+      if (!insight) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Insight not found" } });
+
+      const key = canonicalHash({ id: req.params.insightId, kind: insight.defKind, def: insight.definition, v: insight.defVersion });
+      return resultCache.getOrCompute(
+        key,
+        async () => {
+          if (insight.defKind === "funnel" && opts.chFunnel) {
+            return opts.chFunnel(FunnelSpecSchema.parse(insight.definition), insight.projectId);
+          }
+          const spec = TrendSpecSchema.parse(insight.definition);
+          const runner = opts.readFromClickhouse && opts.chTrend ? opts.chTrend : runTrendPg;
+          return runner(spec, insight.projectId);
+        },
+        req.query.refresh === "1",
+      );
+    },
+  );
+
   /** Funnel query (S08): ordered-step conversion via ClickHouse windowFunnel(). */
   app.post<{ Body: unknown }>("/insights/funnel", async (req, reply) => {
     const body = z.object({ projectId: z.string().min(1).default("demo-project"), spec: FunnelSpecSchema }).parse(req.body);
@@ -283,6 +317,79 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "ClickHouse funnel backend not wired" } });
     }
     return opts.chFunnel(body.spec, body.projectId);
+  });
+
+  /** Create a dashboard (S10). */
+  app.post<{ Body: unknown }>("/dashboards", async (req, reply) => {
+    const body = zod.object({ projectId: zod.string().min(1).default("demo-project"), name: zod.string().min(1).max(200) }).parse(req.body);
+    const row = await prisma.dashboard.create({ data: { projectId: body.projectId, name: body.name }, select: { id: true } });
+    return reply.code(201).send({ id: row.id });
+  });
+
+  /** Add a tile (an insight ref + grid position) to a dashboard. */
+  app.post<{ Params: { dashboardId: string }; Body: unknown }>("/dashboards/:dashboardId/tiles", async (req, reply) => {
+    const body = zod
+      .object({ insightId: zod.string().min(1), x: zod.number().int().default(0), y: zod.number().int().default(0), w: zod.number().int().default(4), h: zod.number().int().default(3) })
+      .parse(req.body);
+    const row = await prisma.dashboardTile.create({ data: { dashboardId: req.params.dashboardId, ...body }, select: { id: true } });
+    return reply.code(201).send({ id: row.id });
+  });
+
+  /** Create a public share token for a dashboard (S10) — shown once. Requires a session (a human action). */
+  app.post<{ Params: { dashboardId: string } }>(
+    "/dashboards/:dashboardId/share",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      const issued = await createShareToken(req.params.dashboardId);
+      return reply.code(201).send({ token: issued.token, prefix: issued.prefix, warning: "Shown once. Anyone with this link can view the dashboard." });
+    },
+  );
+
+  /** A dashboard with its tiles (for rendering). */
+  app.get<{ Params: { dashboardId: string } }>("/dashboards/:dashboardId", async (req, reply) => {
+    const dash = await prisma.dashboard.findUnique({
+      where: { id: req.params.dashboardId },
+      select: { id: true, name: true, tiles: { select: { id: true, insightId: true, x: true, y: true, w: true, h: true } } },
+    });
+    if (!dash) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Dashboard not found" } });
+    return dash;
+  });
+
+  /**
+   * PUBLIC dashboard render (S10) — no session, share-token only. The security shape is the whole lesson: this
+   * path executes ONLY SAVED insight definitions attached to this dashboard. It never accepts a request-supplied
+   * spec/AST. A public endpoint that runs stored queries is fine; one that runs request-supplied queries is a
+   * data-exfiltration API. The boundary is *whose* query runs.
+   */
+  app.get<{ Params: { token: string } }>("/public/:token", async (req, reply) => {
+    const dashboardId = await resolveShareToken(req.params.token);
+    if (!dashboardId) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Invalid share link" } });
+    const dash = await prisma.dashboard.findUnique({
+      where: { id: dashboardId },
+      select: { name: true, tiles: { select: { id: true, insightId: true, x: true, y: true, w: true, h: true } } },
+    });
+    return { name: dash?.name ?? "", tiles: dash?.tiles ?? [] };
+  });
+
+  /** A single tile's result on the public path — restricted to insights that belong to THIS dashboard. */
+  app.get<{ Params: { token: string; insightId: string } }>("/public/:token/tiles/:insightId", async (req, reply) => {
+    const dashboardId = await resolveShareToken(req.params.token);
+    if (!dashboardId) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Invalid share link" } });
+    // The insight must be a tile on this dashboard — you can't pass an arbitrary insightId to read other data.
+    const tile = await prisma.dashboardTile.findFirst({ where: { dashboardId, insightId: req.params.insightId }, select: { id: true } });
+    if (!tile) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Not a tile on this dashboard" } });
+    const insight = await prisma.insight.findUnique({
+      where: { id: req.params.insightId },
+      select: { defKind: true, definition: true, defVersion: true, projectId: true },
+    });
+    if (!insight) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Insight not found" } });
+    const key = canonicalHash({ id: req.params.insightId, kind: insight.defKind, def: insight.definition, v: insight.defVersion });
+    return resultCache.getOrCompute(key, async () => {
+      if (insight.defKind === "funnel" && opts.chFunnel) return opts.chFunnel(FunnelSpecSchema.parse(insight.definition), insight.projectId);
+      const spec = TrendSpecSchema.parse(insight.definition);
+      const runner = opts.readFromClickhouse && opts.chTrend ? opts.chTrend : runTrendPg;
+      return runner(spec, insight.projectId);
+    });
   });
 
   /** Create a cohort (S09) — one AST for property or behavioral. */
