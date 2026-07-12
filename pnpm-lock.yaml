@@ -41,6 +41,9 @@ importers:
       '@pulse/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@pulse/flags':
+        specifier: workspace:*
+        version: link:../../packages/flags
       '@pulse/insights':
         specifier: workspace:*
         version: link:../../packages/insights
@@ -299,6 +302,28 @@ importers:
         specifier: ^2.1.4
         version: 2.1.9(@types/node@22.20.1)(jsdom@25.0.1)
 
+  packages/flags:
+    dependencies:
+      '@pulse/insights':
+        specifier: workspace:*
+        version: link:../insights
+      '@pulse/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      '@pulse/config':
+        specifier: workspace:*
+        version: link:../config
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@22.20.1)(jsdom@25.0.1)
+
   packages/insights:
     dependencies:
       '@pulse/shared':
@@ -342,6 +367,9 @@ importers:
       '@pulse/config':
         specifier: workspace:*
         version: link:../config
+      '@pulse/shared':
+        specifier: workspace:*
+        version: link:../shared
       jsdom:
         specifier: ^25.0.1
         version: 25.0.1

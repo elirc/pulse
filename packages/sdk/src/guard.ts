@@ -16,3 +16,17 @@ export function guard(fn: () => void, onError?: (error: unknown) => void): void 
     }
   }
 }
+
+/** Value-returning guard (S14): for reads like flag evaluation, return `fallback` if the body throws. */
+export function guardValue<T>(fn: () => T, fallback: T, onError?: (error: unknown) => void): T {
+  try {
+    return fn();
+  } catch (error) {
+    try {
+      onError?.(error);
+    } catch {
+      /* best-effort */
+    }
+    return fallback;
+  }
+}

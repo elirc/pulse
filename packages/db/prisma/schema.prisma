@@ -148,6 +148,46 @@ model ShareToken {
   @@index([dashboardId])
 }
 
+// Feature flag (S14): a named decision evaluated per user by deterministic bucketing (NOT a stored assignment).
+// `variants` is [{key,weight}]; `targeting` reuses the S09 cohort filter grammar (Filter[]). The api ships these
+// rows to SDKs as a payload; every evaluator buckets the same way, so no per-user assignment is ever persisted.
+model FeatureFlag {
+  id                String   @id @default(cuid())
+  projectId         String
+  key               String
+  enabled           Boolean  @default(true)
+  rolloutPercentage Int      @default(100)
+  variants          Json
+  targeting         Json     @default("[]")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  experiments Experiment[]
+
+  @@unique([projectId, key])
+  @@index([projectId])
+}
+
+// Experiment (S14): a flag-linked A/B test with a REQUIRED hypothesis (scientific hygiene), a goal metric, and a
+// lifecycle. Exposure→goal conversion per variant drives the significance test. Assignment is never stored — the
+// flag's bucketing decides the variant; we only record EXPOSURE events (who actually saw the difference).
+model Experiment {
+  id          String    @id @default(cuid())
+  projectId   String
+  flagId      String
+  name        String
+  hypothesis  String
+  goalEvent   String
+  status      String    @default("draft") // draft | running | stopped
+  startedAt   DateTime?
+  stoppedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  flag        FeatureFlag @relation(fields: [flagId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([flagId])
+}
+
 // GDPR deletion-request ledger (S13): the compliance evidence trail. One row per erasure request with its
 // outcome — so "we deleted this person" is provable months later, not just asserted. `remaining` must be 0 for
 // a completed request; a non-zero count marks the sweep failed and demands a re-run.

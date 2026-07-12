@@ -25,6 +25,7 @@ import { TailHub } from "./tail";
 import { OnlineWindow, RedisSortedSetStore, type RedisZ } from "./online";
 import { ConcurrencyLimiter, InMemoryCacheStore, type QueuedEvent } from "@pulse/shared";
 import { prisma } from "@pulse/db";
+import type { VariantCount } from "@pulse/flags";
 import type { DeletionLedgerPort, DeletionPorts, DeletionRequest } from "./deletion";
 
 // Wire ingestion metrics off Redis (not exercised in CI). streamDepth/dlqDepth are XLENs; consumerPending is
@@ -152,6 +153,39 @@ const onQueryCost = (e: QueryCostEvent): void => {
   );
 };
 
+// Experiment exposure→goal counts per variant (S14): the funnel behind results. For each variant, distinct
+// exposed persons ($flag_evaluated for this flag+variant) and how many later did the goal event. The z-test math
+// lives in @pulse/flags; this just supplies the counts.
+const experimentCounts = async (experimentId: string, projectId: string): Promise<VariantCount[]> => {
+  const exp = await prisma.experiment.findUnique({
+    where: { id: experimentId },
+    select: { goalEvent: true, flag: { select: { key: true, variants: true } } },
+  });
+  if (!exp) return [];
+  const variants = (exp.flag.variants as Array<{ key: string }>).map((v) => v.key);
+  const out: VariantCount[] = [];
+  for (const variant of variants) {
+    const rs = await ch.query({
+      query:
+        "WITH exposed AS (" +
+        "  SELECT if(personId != '', personId, distinctId) AS person, min(ts) AS firstExp FROM events" +
+        "  WHERE projectId = {pid:String} AND name = '$flag_evaluated'" +
+        "    AND JSONExtractString(props,'$flag_key') = {fk:String}" +
+        "    AND JSONExtractString(props,'$variant') = {v:String} GROUP BY person)," +
+        " goal AS (" +
+        "  SELECT if(personId != '', personId, distinctId) AS person, min(ts) AS goalTs FROM events" +
+        "  WHERE projectId = {pid:String} AND name = {goal:String} GROUP BY person) " +
+        "SELECT count() AS exposed, countIf(g.goalTs >= e.firstExp) AS converted " +
+        "FROM exposed e LEFT JOIN goal g ON e.person = g.person",
+      query_params: { pid: projectId, fk: exp.flag.key, v: variant, goal: exp.goalEvent },
+      format: "JSONEachRow",
+    });
+    const row = ((await rs.json()) as Array<{ exposed: string | number; converted: string | number }>)[0];
+    out.push({ variant, exposed: Number(row?.exposed ?? 0), converted: Number(row?.converted ?? 0) });
+  }
+  return out;
+};
+
 // GDPR deletion ports (S13). Deletion is a background sweep across every store with a count-to-zero verify.
 // The cache is single-instance in-memory here (also handed to the server) so a person delete can flush it.
 const cacheStore = new InMemoryCacheStore();
@@ -249,6 +283,7 @@ const app = buildApiServer({
   onQueryCost,
   cacheStore,
   deletionPorts,
+  experimentCounts,
   readFromClickhouse: env.READ_FROM_CH,
 });
 app

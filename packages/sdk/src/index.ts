@@ -4,7 +4,7 @@
  * stranger's page arrives in a later commit; the shape is fixed now.
  */
 import { Pulse } from "./pulse";
-import { guard } from "./guard";
+import { guard, guardValue } from "./guard";
 import type { PulseOptions } from "./types";
 
 const instance = new Pulse();
@@ -27,6 +27,16 @@ export function reset(): void {
   guard(() => instance.reset(), instance.onError);
 }
 
+/** The variant for a flag (S14), evaluated locally — no network. Unknown flag → null. */
+export function getFeatureFlag(key: string): string | null {
+  return guardValue(() => instance.getFeatureFlag(key), null, instance.onError);
+}
+
+/** Boolean convenience for a flag (S14) — false for the control variant or an unknown flag. */
+export function isFeatureEnabled(key: string): boolean {
+  return guardValue(() => instance.isFeatureEnabled(key), false, instance.onError);
+}
+
 export type { EventEnvelope, PulseOptions } from "./types";
 export { Pulse } from "./pulse";
 export { guard } from "./guard";
@@ -44,3 +54,4 @@ export {
   type BeaconFn,
   type RetryConfig,
 } from "./transport";
+export { evaluateLocal, type FlagPayload, type FlagVariant, type FlagFilter } from "./flags";

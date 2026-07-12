@@ -51,6 +51,9 @@ import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
+import { createFlag, listFlags, flagPayload } from "./flags";
+import { createExperiment, listExperiments, setExperimentStatus } from "./experiments";
+import { FlagSpecSchema, computeExperimentResult, type VariantCount } from "@pulse/flags";
 import { createShareToken, resolveShareToken, revokeShareToken } from "./share";
 import { executePersonDeletion, type DeletionPorts } from "./deletion";
 import { TailHub } from "./tail";
@@ -62,6 +65,19 @@ const CohortBody = zod.object({
   projectId: zod.string().min(1).default("demo-project"),
   name: zod.string().min(1).max(200),
   definition: CohortSpecSchema,
+});
+
+const FlagBody = zod.object({
+  projectId: zod.string().min(1).default("demo-project"),
+  spec: FlagSpecSchema,
+});
+
+const ExperimentBody = zod.object({
+  projectId: zod.string().min(1).default("demo-project"),
+  flagKey: zod.string().min(1),
+  name: zod.string().min(1).max(200),
+  hypothesis: zod.string().min(1).max(2000), // required — scientific hygiene (state it before you look)
+  goalEvent: zod.string().min(1).max(200),
 });
 
 /** Operational metrics for the ingestion pipeline — the numbers become an operational surface (S15 alerts here). */
@@ -116,6 +132,8 @@ export interface ApiServerOptions {
   readFromClickhouse?: boolean;
   /** GDPR deletion ports (S13) — metadata/CH/cache delete + verify + ledger. Absent → the endpoint 503s. */
   deletionPorts?: DeletionPorts;
+  /** Experiment exposure→goal counts per variant (S14) — from a CH funnel. Absent → the results endpoint 503s. */
+  experimentCounts?: (experimentId: string, projectId: string) => Promise<VariantCount[]>;
 }
 
 const IssueKeyBody = z.object({
@@ -570,6 +588,67 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
   app.get<{ Querystring: { projectId?: string } }>("/cohorts", async (req) => {
     return listCohorts(req.query.projectId ?? "demo-project");
   });
+
+  /** Create a feature flag (S14) — variants + rollout % + targeting predicate (reuses the cohort AST). */
+  app.post<{ Body: unknown }>("/flags", { preHandler: requireSession }, async (req, reply) => {
+    const body = FlagBody.parse(req.body);
+    const row = await createFlag(body.projectId, body.spec);
+    return reply.code(201).send({ id: row.id, key: row.key });
+  });
+
+  /** List flags for a project. */
+  app.get<{ Querystring: { projectId?: string } }>("/flags", async (req) => {
+    return listFlags(req.query.projectId ?? "demo-project");
+  });
+
+  /**
+   * Flag payload for the SDK (S14): every flag definition for a project. The SDK evaluates these LOCALLY by
+   * deterministic bucketing — no network per flag check, no assignment stored. Read via a write key in prod.
+   */
+  app.get<{ Querystring: { projectId?: string } }>("/flags/payload", async (req) => {
+    return { flags: await flagPayload(req.query.projectId ?? "demo-project") };
+  });
+
+  /** Create an experiment (S14) — flag-linked, with a REQUIRED hypothesis and a goal event. */
+  app.post<{ Body: unknown }>("/experiments", { preHandler: requireSession }, async (req, reply) => {
+    const body = ExperimentBody.parse(req.body);
+    const res = await createExperiment(body.projectId, body);
+    if ("error" in res) return reply.code(400).send({ error: { code: "BAD_REQUEST", message: res.error } });
+    return reply.code(201).send({ id: res.id });
+  });
+
+  /** List experiments for a project. */
+  app.get<{ Querystring: { projectId?: string } }>("/experiments", async (req) => {
+    return listExperiments(req.query.projectId ?? "demo-project");
+  });
+
+  /** Start / stop an experiment (S14) — draft → running → stopped, one-way. */
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/experiments/:id/status",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      const { status } = zod.object({ status: zod.enum(["running", "stopped"]) }).parse(req.body);
+      const res = await setExperimentStatus(req.params.id, status);
+      if ("error" in res) return reply.code(400).send({ error: { code: "BAD_REQUEST", message: res.error } });
+      return reply.code(200).send({ ok: true });
+    },
+  );
+
+  /**
+   * Experiment results (S14): conversion per variant from exposure→goal, with a two-proportion z-test and a CI
+   * on the lift. Counts come from a funnel over $flag_evaluated → the goal event (reuses S08). The math is pure
+   * (@pulse/flags); this endpoint just fetches the counts and formats.
+   */
+  app.get<{ Params: { id: string }; Querystring: { projectId?: string } }>(
+    "/experiments/:id/results",
+    async (req, reply) => {
+      if (!opts.experimentCounts) {
+        return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "Experiment analysis not wired" } });
+      }
+      const counts = await opts.experimentCounts(req.params.id, req.query.projectId ?? "demo-project");
+      return computeExperimentResult(counts);
+    },
+  );
 
   /** Save an insight — the query DEFINITION, versioned, not its results. */
   app.post<{ Body: unknown }>("/insights", async (req, reply) => {
