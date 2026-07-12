@@ -4,7 +4,15 @@ import { z, ZodError } from "zod";
 import { randomUUID } from "node:crypto";
 import { PrismaKeyStore } from "@pulse/db";
 import { CachedKeyResolver, originAllowed } from "@pulse/auth";
-import { EventInputSchema, resolveEventTime, KeyedRateLimiter, type QueuedEvent } from "@pulse/shared";
+import { createHash } from "node:crypto";
+import {
+  EventInputSchema,
+  resolveEventTime,
+  KeyedRateLimiter,
+  scrubProps,
+  redactKeyInUrl,
+  type QueuedEvent,
+} from "@pulse/shared";
 import type { StreamProducer } from "@pulse/stream";
 import { env } from "./env";
 
@@ -43,7 +51,20 @@ function presentedKey(req: FastifyRequest): string | null {
 }
 
 export function buildIngestServer(opts: IngestServerOptions): FastifyInstance {
-  const app = Fastify({ logger: process.env.NODE_ENV === "production" ? { level: "info" } : false });
+  const app = Fastify({
+    logger: process.env.NODE_ENV === "production"
+      ? {
+          level: "info",
+          // Log redaction (S13): the S03 beacon path carries the write key in `?k=`. Strip it from the logged
+          // URL so a credential never lands in an access log verbatim.
+          serializers: {
+            req(req: { method: string; url: string }) {
+              return { method: req.method, url: redactKeyInUrl(req.url) };
+            },
+          },
+        }
+      : false,
+  });
   // CORS policy #1 (ingest): any origin. An analytics endpoint WANTS cross-origin traffic — customer sites on
   // every domain post here; that's the product, not a hole. The danger was never CORS, it was what the
   // credential allows (solved by the write/secret capability split). The app API uses the opposite policy
@@ -121,10 +142,13 @@ export function buildIngestServer(opts: IngestServerOptions): FastifyInstance {
     const nowDate = new Date();
     const now = nowDate.toISOString();
     for (const input of inputs) {
+      // PII scrubbing at ingest (S13): drop/hash sensitive properties BEFORE they land — what never lands can't
+      // leak. sha256 is the pseudonymizing hash for HASH-rule props (email/phone/ip stay joinable, not readable).
+      const scrubbed = scrubProps(input.props, (v) => createHash("sha256").update(v).digest("hex"));
       // Timestamp policy (S13, harvests flaw #3): server ingestedAt is authoritative; the client ts is trusted
       // only within a ±48h skew window and otherwise clamped to the boundary and flagged with `$ts_clamped`.
       const resolvedTime = resolveEventTime(input.ts, nowDate);
-      const props = resolvedTime.clamped ? { ...input.props, $ts_clamped: true } : input.props;
+      const props = resolvedTime.clamped ? { ...scrubbed.props, $ts_clamped: true } : scrubbed.props;
       const queued: QueuedEvent = {
         uuid: input.uuid ?? randomUUID(), // prefer the SDK's client-minted id; mint one if a raw caller omitted it
         projectId: resolved.projectId,
