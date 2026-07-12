@@ -8,6 +8,7 @@ import { prisma } from "@pulse/db";
 import { IdentityResolver } from "./identity";
 import { PrismaPersonStore } from "./personstore";
 import { PrismaAdvisoryLocker } from "./locker";
+import { Sessionizer, RedisSessionStore, type RedisKV } from "./session";
 import { BufferedColumnStore, ClickHouseColumnStore, type ClickHouseLike, type ColumnStore } from "./columnstore";
 import { processNewBatch, processPendingBatch } from "./worker";
 import { env } from "./env";
@@ -40,7 +41,8 @@ async function main(): Promise<void> {
     console.log(env.EVENTS_PRIMARY === "ch" ? "ClickHouse is PRIMARY (PG decommissioned)" : "dual-write ON — CH shadow");
   }
 
-  const deps = { stream, store, dlq, resolver, columnStore, group: env.CONSUMER_GROUP, batchSize: env.BATCH_SIZE };
+  const sessionizer = new Sessionizer(new RedisSessionStore(redis as unknown as RedisKV));
+  const deps = { stream, store, dlq, resolver, columnStore, sessionizer, group: env.CONSUMER_GROUP, batchSize: env.BATCH_SIZE };
 
   await stream.ensureGroup(env.CONSUMER_GROUP);
   console.log(`pulse consumer '${env.CONSUMER_NAME}' on group '${env.CONSUMER_GROUP}'`);
