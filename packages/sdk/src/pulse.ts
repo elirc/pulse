@@ -26,6 +26,7 @@ export class Pulse {
   private teardownPageview: (() => void) | null = null;
   private flags: FlagPayload[] = [];
   private flagProps: Record<string, unknown> = {};
+  private exposed = new Set<string>();
   /** Host-supplied sink for the SDK's own errors, used by the never-throw boundary in index.ts. */
   onError: ((error: unknown) => void) | undefined;
 
@@ -99,6 +100,7 @@ export class Pulse {
   reset(): void {
     this.storage.remove(DISTINCT_ID_KEY);
     this.distinctId = loadOrCreateDistinctId(this.storage);
+    this.exposed.clear(); // a new identity is a new subject — re-expose flags for the new distinctId
   }
 
   /** Current distinct id (mostly for tests/debugging). */
@@ -133,19 +135,33 @@ export class Pulse {
     }
   }
 
-  /** The variant for a flag, evaluated locally (S14). Unknown flag → null. No network. */
+  /** The variant for a flag, evaluated locally (S14). Unknown flag → null. No network. Records exposure. */
   getFeatureFlag(key: string): string | null {
     const flag = this.flags.find((f) => f.key === key);
     if (!flag) return null;
-    return evaluateLocal(flag, this.distinctId, this.flagProps);
+    const variant = evaluateLocal(flag, this.distinctId, this.flagProps);
+    this.recordExposure(key, variant);
+    return variant;
   }
 
   /** Boolean convenience: true unless the flag resolves to its control/off (first) variant or is unknown. */
   isFeatureEnabled(key: string): boolean {
+    const variant = this.getFeatureFlag(key);
     const flag = this.flags.find((f) => f.key === key);
-    if (!flag) return false;
-    const variant = evaluateLocal(flag, this.distinctId, this.flagProps);
-    return variant !== flag.variants[0]?.key;
+    return variant !== null && variant !== flag?.variants[0]?.key;
+  }
+
+  /**
+   * Emit a `$flag_evaluated` EXPOSURE event (S14) — the measurement an experiment actually needs: who *saw* the
+   * variant, not who was merely assigned. Deduped per (flag, variant) for the session, because a flag checked on
+   * every render would otherwise flood the pipeline with identical exposures. Exposure ≠ assignment: assignment
+   * is free (bucketing), exposure is the observable event that anchors the experiment funnel's first step.
+   */
+  private recordExposure(flagKey: string, variant: string): void {
+    const dedupeKey = `${flagKey}:${variant}`;
+    if (this.exposed.has(dedupeKey)) return;
+    this.exposed.add(dedupeKey);
+    this.capture("$flag_evaluated", { $flag_key: flagKey, $variant: variant });
   }
 
   /** Teardown: restore history, stop the flush timer. Leave the host page as we found it. */
