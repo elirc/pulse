@@ -5,13 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsup src/index.ts --format esm --clean --external @prisma/client --external ioredis",
+    "build": "tsup src/index.ts --format esm --clean --external @prisma/client --external ioredis --external @clickhouse/client",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "eslint src"
   },
   "dependencies": {
+    "@clickhouse/client": "^1.4.0",
     "@pulse/db": "workspace:*",
     "@pulse/shared": "workspace:*",
     "@pulse/stream": "workspace:*",

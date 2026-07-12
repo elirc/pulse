@@ -135,6 +135,10 @@ model ApiKey {
 // ours). `ts` is EVENT time (client clock — trusted in S1, a flaw revisited in S04/S13); `ingestedAt` is
 // SERVER time. `projectId` is now resolved from a write key (S02) but stays a bare String with NO foreign
 // key to Project on purpose: events migrate to ClickHouse in S07, and a cross-store FK cannot be enforced.
+//
+// ARCHIVED (S07 decommission): the events store is now ClickHouse. The consumer no longer writes to this table
+// (EVENTS_PRIMARY=ch), and the app API reads events from ClickHouse. This model is kept read-only for the
+// historical archive and any one-off backfill re-runs; new writes go to CH. Do not re-point writes here.
 model Event {
   id         String   @id @default(cuid())
   // Client-minted idempotency key (SDK envelope → ingest → stream). The unique index is the dedup mechanism:

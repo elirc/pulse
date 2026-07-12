@@ -3,10 +3,12 @@ import { RedisEventStream, type RedisLike } from "@pulse/stream";
 import type { QueuedEvent } from "@pulse/shared";
 import { PrismaEventStore } from "./store";
 import { StreamDeadLetterQueue, type DeadLetterRecord } from "./dlq";
+import { createClient } from "@clickhouse/client";
 import { prisma } from "@pulse/db";
 import { IdentityResolver } from "./identity";
 import { PrismaPersonStore } from "./personstore";
 import { PrismaAdvisoryLocker } from "./locker";
+import { BufferedColumnStore, ClickHouseColumnStore, type ClickHouseLike, type ColumnStore } from "./columnstore";
 import { processNewBatch, processPendingBatch } from "./worker";
 import { env } from "./env";
 
@@ -23,10 +25,22 @@ async function main(): Promise<void> {
     env.DLQ_KEY,
     env.CONSUMER_NAME,
   );
-  const store = new PrismaEventStore();
   const dlq = new StreamDeadLetterQueue(dlqStream);
   const resolver = new IdentityResolver(new PrismaPersonStore(), { locker: new PrismaAdvisoryLocker(prisma) });
-  const deps = { stream, store, dlq, resolver, group: env.CONSUMER_GROUP, batchSize: env.BATCH_SIZE };
+
+  // Postgres events store — the source of truth UNTIL decommission. After EVENTS_PRIMARY flips to 'ch', we stop
+  // writing PG events entirely (the table is archived); ClickHouse becomes truth.
+  const store = env.EVENTS_PRIMARY === "pg" ? new PrismaEventStore() : undefined;
+
+  // ClickHouse: a shadow during dual-write, the source of truth once PG is decommissioned.
+  let columnStore: ColumnStore | undefined;
+  if (env.DUAL_WRITE || env.EVENTS_PRIMARY === "ch") {
+    const ch = createClient({ url: env.CLICKHOUSE_URL, database: env.CLICKHOUSE_DB });
+    columnStore = new BufferedColumnStore(new ClickHouseColumnStore(ch as unknown as ClickHouseLike));
+    console.log(env.EVENTS_PRIMARY === "ch" ? "ClickHouse is PRIMARY (PG decommissioned)" : "dual-write ON — CH shadow");
+  }
+
+  const deps = { stream, store, dlq, resolver, columnStore, group: env.CONSUMER_GROUP, batchSize: env.BATCH_SIZE };
 
   await stream.ensureGroup(env.CONSUMER_GROUP);
   console.log(`pulse consumer '${env.CONSUMER_NAME}' on group '${env.CONSUMER_GROUP}'`);

@@ -3,7 +3,14 @@ import cors from "@fastify/cors";
 import { z, ZodError } from "zod";
 import { prisma, PrismaKeyStore } from "@pulse/db";
 import { CachedKeyResolver, keyCan } from "@pulse/auth";
-import { TrendSpecSchema, compileTrendSql, foldTopNRows, type FlatRow } from "@pulse/insights";
+import {
+  TrendSpecSchema,
+  compileTrendSql,
+  foldTopNRows,
+  UNIQ_RELATIVE_ERROR,
+  type FlatRow,
+  type TrendSpec,
+} from "@pulse/insights";
 import type { DailyCount } from "@pulse/shared";
 import { env } from "./env";
 import { requireSession } from "./auth";
@@ -17,11 +24,18 @@ export interface IngestOps {
   dlqDepth(): Promise<number>;
 }
 
+/** Runs a compiled trend query against a backend, returning flat rows. */
+export type TrendRunner = (spec: TrendSpec, projectId: string) => Promise<FlatRow[]>;
+
 export interface ApiServerOptions {
   /** Injectable so CI resolves keys against an in-memory store; production defaults to Prisma. */
   resolver?: CachedKeyResolver;
   /** Ingestion pipeline metrics source; wired to Redis in production, an in-memory fake in tests. */
   ingestOps?: IngestOps;
+  /** ClickHouse trend backend (S07). When present + readFromClickhouse, trends read CH; verify runs both. */
+  chTrend?: TrendRunner;
+  /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
+  readFromClickhouse?: boolean;
 }
 
 const IssueKeyBody = z.object({
@@ -153,13 +167,55 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
    * (see @pulse/insights) — user input reaches the query only as bound params, never as SQL text. Returns flat
    * { bucket, label, value } rows; the web pivots them into a chart. (Analyst-facing; auth hardening later.)
    */
-  app.post<{ Body: unknown }>("/insights/trend", async (req) => {
-    const body = TrendBody.parse(req.body);
-    const { text, params } = compileTrendSql(body.spec, body.projectId);
+  /** Run a trend against Postgres (compile → parameterized SQL → query → fold top-N). */
+  const runTrendPg: TrendRunner = async (spec, projectId) => {
+    const { text, params } = compileTrendSql(spec, projectId);
     const rows = await prisma.$queryRawUnsafe<TrendRow[]>(text, ...params);
     const flat: FlatRow[] = rows.map((r) => ({ bucket: r.bucket, label: r.label ?? null, value: Number(r.value) }));
-    // Breakdowns fold the long tail into "Other" so a high-cardinality property can't return thousands of series.
-    return body.spec.breakdown ? foldTopNRows(flat, body.spec.topN) : flat;
+    return spec.breakdown ? foldTopNRows(flat, spec.topN) : flat;
+  };
+
+  app.post<{ Body: unknown }>("/insights/trend", async (req) => {
+    const body = TrendBody.parse(req.body);
+    // Read cutover (S07): serve from ClickHouse once the flag flips; Postgres until then.
+    const runner = opts.readFromClickhouse && opts.chTrend ? opts.chTrend : runTrendPg;
+    return runner(body.spec, body.projectId);
+  });
+
+  /**
+   * Live-verify (S07): run the same trend on BOTH engines and return them side by side with a per-bucket
+   * drift/tolerance check — the soak-week page that proves parity in production before and after cutover. Count
+   * drift must be zero; unique drift is allowed within uniq()'s documented error bound.
+   */
+  app.post<{ Body: unknown }>("/insights/trend/verify", async (req, reply) => {
+    const body = TrendBody.parse(req.body);
+    if (!opts.chTrend) {
+      return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "ClickHouse backend not wired" } });
+    }
+    const [pg, ch] = await Promise.all([runTrendPg(body.spec, body.projectId), opts.chTrend(body.spec, body.projectId)]);
+    // Index each side by (bucket, label) via nested maps — no fragile separator, no control chars.
+    const index = (rows: FlatRow[]): Map<string, Map<string, number>> => {
+      const m = new Map<string, Map<string, number>>();
+      for (const r of rows) {
+        let byLabel = m.get(r.bucket);
+        if (!byLabel) m.set(r.bucket, (byLabel = new Map()));
+        byLabel.set(r.label ?? "", r.value);
+      }
+      return m;
+    };
+    const pgIdx = index(pg);
+    const chIdx = index(ch);
+    const drift: Array<{ bucket: string; label: string | null; pg: number; ch: number }> = [];
+    for (const bucket of new Set([...pgIdx.keys(), ...chIdx.keys()])) {
+      const labels = new Set([...(pgIdx.get(bucket)?.keys() ?? []), ...(chIdx.get(bucket)?.keys() ?? [])]);
+      for (const label of labels) {
+        const p = pgIdx.get(bucket)?.get(label) ?? 0;
+        const c = chIdx.get(bucket)?.get(label) ?? 0;
+        const tolerance = body.spec.metric === "unique" ? Math.ceil(p * UNIQ_RELATIVE_ERROR) : 0;
+        if (Math.abs(p - c) > tolerance) drift.push({ bucket, label: label || null, pg: p, ch: c });
+      }
+    }
+    return { pg, ch, drift, ok: drift.length === 0 };
   });
 
   /** Save an insight — the query DEFINITION, versioned, not its results. */
