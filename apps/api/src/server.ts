@@ -40,7 +40,7 @@ import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
-import { createShareToken } from "./share";
+import { createShareToken, resolveShareToken } from "./share";
 import { CohortSpecSchema } from "@pulse/insights";
 
 const CohortBody = zod.object({
@@ -353,6 +353,43 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     });
     if (!dash) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Dashboard not found" } });
     return dash;
+  });
+
+  /**
+   * PUBLIC dashboard render (S10) — no session, share-token only. The security shape is the whole lesson: this
+   * path executes ONLY SAVED insight definitions attached to this dashboard. It never accepts a request-supplied
+   * spec/AST. A public endpoint that runs stored queries is fine; one that runs request-supplied queries is a
+   * data-exfiltration API. The boundary is *whose* query runs.
+   */
+  app.get<{ Params: { token: string } }>("/public/:token", async (req, reply) => {
+    const dashboardId = await resolveShareToken(req.params.token);
+    if (!dashboardId) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Invalid share link" } });
+    const dash = await prisma.dashboard.findUnique({
+      where: { id: dashboardId },
+      select: { name: true, tiles: { select: { id: true, insightId: true, x: true, y: true, w: true, h: true } } },
+    });
+    return { name: dash?.name ?? "", tiles: dash?.tiles ?? [] };
+  });
+
+  /** A single tile's result on the public path — restricted to insights that belong to THIS dashboard. */
+  app.get<{ Params: { token: string; insightId: string } }>("/public/:token/tiles/:insightId", async (req, reply) => {
+    const dashboardId = await resolveShareToken(req.params.token);
+    if (!dashboardId) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Invalid share link" } });
+    // The insight must be a tile on this dashboard — you can't pass an arbitrary insightId to read other data.
+    const tile = await prisma.dashboardTile.findFirst({ where: { dashboardId, insightId: req.params.insightId }, select: { id: true } });
+    if (!tile) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Not a tile on this dashboard" } });
+    const insight = await prisma.insight.findUnique({
+      where: { id: req.params.insightId },
+      select: { defKind: true, definition: true, defVersion: true, projectId: true },
+    });
+    if (!insight) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Insight not found" } });
+    const key = canonicalHash({ id: req.params.insightId, kind: insight.defKind, def: insight.definition, v: insight.defVersion });
+    return resultCache.getOrCompute(key, async () => {
+      if (insight.defKind === "funnel" && opts.chFunnel) return opts.chFunnel(FunnelSpecSchema.parse(insight.definition), insight.projectId);
+      const spec = TrendSpecSchema.parse(insight.definition);
+      const runner = opts.readFromClickhouse && opts.chTrend ? opts.chTrend : runTrendPg;
+      return runner(spec, insight.projectId);
+    });
   });
 
   /** Create a cohort (S09) — one AST for property or behavioral. */
