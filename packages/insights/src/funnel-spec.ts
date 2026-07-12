@@ -42,4 +42,12 @@ export interface FunnelResult {
   steps: FunnelStepResult[];
   /** Median ms from step-1 to the final step, over people who converted fully. */
   medianTimeToConvertMs: number | null;
+  /** p90 of the same distribution — medians lie less than means for skewed durations; p90 shows the tail. */
+  p90TimeToConvertMs: number | null;
+}
+
+/** One breakdown row: a property value and its funnel. */
+export interface FunnelBreakdownResult {
+  label: string;
+  result: FunnelResult;
 }

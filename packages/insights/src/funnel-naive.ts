@@ -66,7 +66,8 @@ export function computeFunnelNaive(
 
   // Time-to-convert for fully-converted persons: final step time − anchor.
   const durations = [...reached.values()].map((p) => p.lastTs - p.anchorTs).sort((a, b) => a - b);
-  const medianTimeToConvertMs = durations.length === 0 ? null : durations[Math.floor(durations.length / 2)];
+  const pct = (p: number): number | null =>
+    durations.length === 0 ? null : durations[Math.min(durations.length - 1, Math.floor(p * durations.length))];
 
-  return { steps, medianTimeToConvertMs };
+  return { steps, medianTimeToConvertMs: pct(0.5), p90TimeToConvertMs: pct(0.9) };
 }

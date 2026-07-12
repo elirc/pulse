@@ -6,12 +6,25 @@
  * Correct-then-fast: it must return what the naive oracle returns (a parity test pins it), just ~100× faster.
  */
 import { matchesAll, unitOf, type EventLike } from "./compute";
-import type { FunnelResult, FunnelSpec, FunnelStep, FunnelStepResult } from "./funnel-spec";
+import type {
+  FunnelBreakdownResult,
+  FunnelResult,
+  FunnelSpec,
+  FunnelStep,
+  FunnelStepResult,
+} from "./funnel-spec";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function matchesStep(e: EventLike, step: FunnelStep): boolean {
   return e.name === step.event && matchesAll(e.props, step.filters);
+}
+
+/** Exact percentile of an ascending-sorted array (the "obvious" implementation, kept as the oracle for CH's
+ *  quantile() sketch). */
+export function percentile(sortedAsc: number[], p: number): number | null {
+  if (sortedAsc.length === 0) return null;
+  return sortedAsc[Math.min(sortedAsc.length - 1, Math.floor(p * sortedAsc.length))];
 }
 
 export function computeFunnel(
@@ -65,6 +78,44 @@ export function computeFunnel(
   }));
 
   durations.sort((a, b) => a - b);
-  const medianTimeToConvertMs = durations.length === 0 ? null : durations[Math.floor(durations.length / 2)];
-  return { steps, medianTimeToConvertMs };
+  return {
+    steps,
+    medianTimeToConvertMs: percentile(durations, 0.5),
+    p90TimeToConvertMs: percentile(durations, 0.9),
+  };
+}
+
+/**
+ * Funnel broken down by a property: group people by their step-1 event's property value, compute a funnel per
+ * value, keep the top-N by entrants. (Uses the single-pass computeFunnel per group.)
+ */
+export function computeFunnelBreakdown(
+  events: EventLike[],
+  spec: FunnelSpec,
+  now: () => Date = () => new Date(),
+  topN = 10,
+): FunnelBreakdownResult[] {
+  if (!spec.breakdown) return [{ label: "All", result: computeFunnel(events, spec, now) }];
+
+  // Assign each person a breakdown label from their FIRST step-1 event's property.
+  const step0 = spec.steps[0];
+  const labelOf = new Map<string, string>();
+  for (const e of events) {
+    if (e.name !== step0.event) continue;
+    const person = unitOf(e);
+    if (!labelOf.has(person)) {
+      const v = e.props[spec.breakdown];
+      labelOf.set(person, v === undefined || v === null ? "(none)" : String(v));
+    }
+  }
+  const groups = new Map<string, EventLike[]>();
+  for (const e of events) {
+    const label = labelOf.get(unitOf(e));
+    if (label === undefined) continue;
+    (groups.get(label) ?? groups.set(label, []).get(label)!).push(e);
+  }
+  return [...groups.entries()]
+    .map(([label, evs]) => ({ label, result: computeFunnel(evs, spec, now) }))
+    .sort((a, b) => b.result.steps[0].count - a.result.steps[0].count)
+    .slice(0, topN);
 }
