@@ -29,6 +29,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@clickhouse/client':
+        specifier: ^1.4.0
+        version: 1.23.1
       '@fastify/cors':
         specifier: ^10.0.1
         version: 10.1.0

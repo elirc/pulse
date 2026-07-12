@@ -11,6 +11,10 @@ const EnvSchema = z.object({
   STREAM_KEY: z.string().default("pulse:events"),
   DLQ_KEY: z.string().default("pulse:events:dlq"),
   CONSUMER_GROUP: z.string().default("inserters"),
+  // S07 migration flags.
+  CLICKHOUSE_URL: z.string().default("http://localhost:8123"),
+  CLICKHOUSE_DB: z.string().default("pulse"),
+  READ_FROM_CH: z.coerce.boolean().default(false), // read cutover: serve trends from ClickHouse
 });
 
 export const env = EnvSchema.parse(process.env);
