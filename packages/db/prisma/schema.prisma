@@ -139,6 +139,10 @@ model ShareToken {
   hash        String    @unique
   prefix      String
   createdAt   DateTime  @default(now())
+  // S13 (harvests flaw #5): links now expire, and can be revoked. A null expiresAt means "no expiry" (legacy);
+  // new tokens always get one. revokedAt is set by the revoke endpoint — a killed link dies immediately.
+  expiresAt   DateTime?
+  revokedAt   DateTime?
   dashboard   Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
 
   @@index([dashboardId])

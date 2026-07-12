@@ -51,7 +51,7 @@ import { requireSession } from "./auth";
 import { resolveKey } from "./keyauth";
 import { assertProjectInOrg, issueKey, listKeys } from "./keys";
 import { createCohort, listCohorts } from "./cohorts";
-import { createShareToken, resolveShareToken } from "./share";
+import { createShareToken, resolveShareToken, revokeShareToken } from "./share";
 import { TailHub } from "./tail";
 import { OnlineWindow } from "./online";
 import { randomUUID } from "node:crypto";
@@ -458,7 +458,23 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
     { preHandler: requireSession },
     async (req, reply) => {
       const issued = await createShareToken(req.params.dashboardId);
-      return reply.code(201).send({ token: issued.token, prefix: issued.prefix, warning: "Shown once. Anyone with this link can view the dashboard." });
+      return reply.code(201).send({
+        token: issued.token,
+        prefix: issued.prefix,
+        expiresAt: issued.expiresAt.toISOString(),
+        warning: "Shown once. Anyone with this link can view the dashboard until it expires.",
+      });
+    },
+  );
+
+  /** Revoke a share token by its public prefix (S13, flaw #5) — a leaked link can be killed immediately. */
+  app.delete<{ Params: { dashboardId: string; prefix: string } }>(
+    "/dashboards/:dashboardId/share/:prefix",
+    { preHandler: requireSession },
+    async (req, reply) => {
+      const revoked = await revokeShareToken(req.params.dashboardId, req.params.prefix);
+      if (revoked === 0) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "No active link with that prefix" } });
+      return reply.code(200).send({ revoked });
     },
   );
 
@@ -479,7 +495,7 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
    * data-exfiltration API. The boundary is *whose* query runs.
    */
   app.get<{ Params: { token: string } }>("/public/:token", async (req, reply) => {
-    const dashboardId = await resolveShareToken(req.params.token);
+    const dashboardId = await resolveShareToken(req.params.token, req.ip);
     if (!dashboardId) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Invalid share link" } });
     const dash = await prisma.dashboard.findUnique({
       where: { id: dashboardId },
@@ -490,7 +506,7 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
 
   /** A single tile's result on the public path — restricted to insights that belong to THIS dashboard. */
   app.get<{ Params: { token: string; insightId: string } }>("/public/:token/tiles/:insightId", async (req, reply) => {
-    const dashboardId = await resolveShareToken(req.params.token);
+    const dashboardId = await resolveShareToken(req.params.token, req.ip);
     if (!dashboardId) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Invalid share link" } });
     // The insight must be a tile on this dashboard — you can't pass an arbitrary insightId to read other data.
     const tile = await prisma.dashboardTile.findFirst({ where: { dashboardId, insightId: req.params.insightId }, select: { id: true } });
