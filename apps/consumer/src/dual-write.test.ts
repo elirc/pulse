@@ -41,6 +41,39 @@ describe("dual-write (S07)", () => {
     expect(columnStore.rows.map((r) => r.personId).every(Boolean)).toBe(true); // resolved before both writes
   });
 
+  it("post-decommission: with no PG store, events go to CH only and its failure PROPAGATES (CH is truth)", async () => {
+    const stream = new InMemoryEventStream<QueuedEvent>();
+    for (let i = 0; i < 2; i++) await stream.add(qe(`e${i}`));
+    const columnStore = new InMemoryColumnStore();
+
+    // store omitted → ClickHouse is primary.
+    const total = await drain({
+      stream,
+      columnStore,
+      dlq: new InMemoryDeadLetterQueue(),
+      resolver: new IdentityResolver(new InMemoryPersonStore()),
+      group: GROUP,
+      batchSize: 100,
+    });
+    expect(total).toBe(2);
+    expect(columnStore.rows).toHaveLength(2); // written to CH, the new truth
+
+    // A CH failure now must surface (no PG to fall back to).
+    const stream2 = new InMemoryEventStream<QueuedEvent>();
+    await stream2.add(qe("x"));
+    const failing = { insert: () => Promise.reject(new Error("CH down")) };
+    await expect(
+      drain({
+        stream: stream2,
+        columnStore: failing,
+        dlq: new InMemoryDeadLetterQueue(),
+        resolver: new IdentityResolver(new InMemoryPersonStore()),
+        group: GROUP,
+        batchSize: 100,
+      }),
+    ).rejects.toThrow("CH down");
+  });
+
   it("a shadow (CH) write failure does not fail the batch — PG stays authoritative", async () => {
     const stream = new InMemoryEventStream<QueuedEvent>();
     await stream.add(qe("e1"));

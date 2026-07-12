@@ -17,12 +17,13 @@ import type { IdentityResolver } from "./identity";
 
 export interface WorkerDeps {
   stream: EventStream<QueuedEvent>;
-  store: EventStore;
+  /** Postgres events store — the source of truth DURING the migration. Omitted after decommission (S07). */
+  store?: EventStore;
   dlq: DeadLetterQueue;
   resolver: IdentityResolver;
   group: string;
   batchSize: number;
-  /** When set (S07 migration), dual-write to the columnar store too. PG stays the source of truth; CH shadows. */
+  /** ClickHouse store. A shadow while `store` is present (dual-write); the source of truth once it isn't. */
   columnStore?: ColumnStore;
 }
 
@@ -70,14 +71,20 @@ async function processBatch(deps: WorkerDeps, mode: "new" | "pending"): Promise<
     good.push({ ...enriched, personId });
   }
   if (good.length > 0) {
-    await deps.store.insertBatch(good); // Postgres — the source of truth
-    // Dual-write shadow to ClickHouse (S07). PG is truth: a CH write failure must NOT fail the batch or block
-    // the ack, or a shadow that isn't authoritative yet could stall the pipeline. Log-and-continue.
+    if (deps.store) await deps.store.insertBatch(good); // Postgres — source of truth while it's present
     if (deps.columnStore) {
-      try {
+      if (deps.store) {
+        // Dual-write phase: PG is truth, CH shadows. A shadow failure must NOT fail the batch or block the ack;
+        // reconciliation catches any gap.
+        try {
+          await deps.columnStore.insert(good);
+        } catch {
+          /* shadow write failed — reconciliation will catch it */
+        }
+      } else {
+        // Post-decommission: ClickHouse IS the source of truth now — its failure must propagate (no swallow),
+        // because there is no other system of record to fall back to.
         await deps.columnStore.insert(good);
-      } catch {
-        /* shadow write failed — reconciliation will catch the gap; do not fail the authoritative path */
       }
     }
   }

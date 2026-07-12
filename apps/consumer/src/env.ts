@@ -13,6 +13,8 @@ const EnvSchema = z.object({
   CLICKHOUSE_URL: z.string().default("http://localhost:8123"),
   CLICKHOUSE_DB: z.string().default("pulse"),
   DUAL_WRITE: z.coerce.boolean().default(false), // write PG (truth) + CH (shadow)
+  // Events source of truth. 'pg' = write PG (+ CH shadow if dual-write). 'ch' = decommissioned: write CH only.
+  EVENTS_PRIMARY: z.enum(["pg", "ch"]).default("pg"),
 });
 
 export const env = EnvSchema.parse(process.env);
