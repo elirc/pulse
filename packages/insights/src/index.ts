@@ -3,6 +3,7 @@
  * (compute.ts, the golden-fixture oracle), and a parameterized SQL compiler (sql.ts). Pure and DB-free.
  */
 export * from "./spec";
+export * from "./funnel-spec";
 export * from "./compute";
 export * from "./sql";
 export * from "./sql-clickhouse";
