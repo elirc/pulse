@@ -45,8 +45,13 @@ function matchesFilter(props: Record<string, unknown>, f: Filter): boolean {
   }
 }
 
-function matchesAll(props: Record<string, unknown>, filters: Filter[]): boolean {
+export function matchesAll(props: Record<string, unknown>, filters: Filter[]): boolean {
   return filters.every((f) => matchesFilter(props, f));
+}
+
+/** The unit a funnel/unique counts by: the resolved person, falling back to distinctId. */
+export function unitOf(e: EventLike): string {
+  return e.personId ?? e.distinctId;
 }
 
 /** UTC bucket key for an event time. "daily" is a timezone opinion; we bucket in UTC and revisit project-tz later. */

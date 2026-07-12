@@ -5,11 +5,14 @@ import { prisma, PrismaKeyStore } from "@pulse/db";
 import { CachedKeyResolver, keyCan } from "@pulse/auth";
 import {
   TrendSpecSchema,
+  FunnelSpecSchema,
   compileTrendSql,
   foldTopNRows,
   UNIQ_RELATIVE_ERROR,
   type FlatRow,
   type TrendSpec,
+  type FunnelSpec,
+  type FunnelResult,
 } from "@pulse/insights";
 import type { DailyCount } from "@pulse/shared";
 import { env } from "./env";
@@ -26,6 +29,8 @@ export interface IngestOps {
 
 /** Runs a compiled trend query against a backend, returning flat rows. */
 export type TrendRunner = (spec: TrendSpec, projectId: string) => Promise<FlatRow[]>;
+/** Runs a funnel against a backend (ClickHouse windowFunnel), returning the funnel result. */
+export type FunnelRunner = (spec: FunnelSpec, projectId: string) => Promise<FunnelResult>;
 
 export interface ApiServerOptions {
   /** Injectable so CI resolves keys against an in-memory store; production defaults to Prisma. */
@@ -34,6 +39,8 @@ export interface ApiServerOptions {
   ingestOps?: IngestOps;
   /** ClickHouse trend backend (S07). When present + readFromClickhouse, trends read CH; verify runs both. */
   chTrend?: TrendRunner;
+  /** ClickHouse funnel backend (S08). Funnels run as windowFunnel() queries. */
+  chFunnel?: FunnelRunner;
   /** Read cutover flag (S07): serve trends from ClickHouse instead of Postgres. */
   readFromClickhouse?: boolean;
 }
@@ -216,6 +223,15 @@ export function buildApiServer(opts: ApiServerOptions = {}): FastifyInstance {
       }
     }
     return { pg, ch, drift, ok: drift.length === 0 };
+  });
+
+  /** Funnel query (S08): ordered-step conversion via ClickHouse windowFunnel(). */
+  app.post<{ Body: unknown }>("/insights/funnel", async (req, reply) => {
+    const body = z.object({ projectId: z.string().min(1).default("demo-project"), spec: FunnelSpecSchema }).parse(req.body);
+    if (!opts.chFunnel) {
+      return reply.code(503).send({ error: { code: "UNCONFIGURED", message: "ClickHouse funnel backend not wired" } });
+    }
+    return opts.chFunnel(body.spec, body.projectId);
   });
 
   /** Save an insight — the query DEFINITION, versioned, not its results. */

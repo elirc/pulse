@@ -1,8 +1,8 @@
 import Redis from "ioredis";
 import { createClient } from "@clickhouse/client";
 import { RedisEventStream, type RedisLike } from "@pulse/stream";
-import { compileTrendClickhouse, foldTopNRows, type FlatRow } from "@pulse/insights";
-import { buildApiServer, env, type IngestOps, type TrendRunner } from "./server";
+import { compileTrendClickhouse, compileFunnelClickhouse, foldTopNRows, type FlatRow } from "@pulse/insights";
+import { buildApiServer, env, type IngestOps, type TrendRunner, type FunnelRunner } from "./server";
 
 // Wire ingestion metrics off Redis (not exercised in CI). streamDepth/dlqDepth are XLENs; consumerPending is
 // the group's pending-entries count.
@@ -26,7 +26,28 @@ const chTrend: TrendRunner = async (spec, projectId) => {
   return spec.breakdown ? foldTopNRows(flat, spec.topN) : flat;
 };
 
-const app = buildApiServer({ ingestOps, chTrend, readFromClickhouse: env.READ_FROM_CH });
+// ClickHouse funnel backend (S08): windowFunnel() → per-step counts → FunnelResult.
+const chFunnel: FunnelRunner = async (spec, projectId) => {
+  const { text, params } = compileFunnelClickhouse(spec, projectId);
+  const rs = await ch.query({ query: text, query_params: params, format: "JSONEachRow" });
+  const rows = (await rs.json()) as Array<Record<string, string | number>>;
+  const row = rows[0] ?? {};
+  const counts = spec.steps.map((_, i) => Number(row[`step${i + 1}`] ?? 0));
+  const start = counts[0];
+  return {
+    steps: spec.steps.map((s, i) => ({
+      step: i + 1,
+      event: s.event,
+      count: counts[i],
+      conversionFromStart: start === 0 ? 0 : counts[i] / start,
+      conversionFromPrev: i === 0 ? 1 : counts[i - 1] === 0 ? 0 : counts[i] / counts[i - 1],
+    })),
+    medianTimeToConvertMs: null, // a separate quantile() query would fill these; deferred
+    p90TimeToConvertMs: null,
+  };
+};
+
+const app = buildApiServer({ ingestOps, chTrend, chFunnel, readFromClickhouse: env.READ_FROM_CH });
 app
   .listen({ port: env.API_PORT, host: "0.0.0.0" })
   .then(() => {

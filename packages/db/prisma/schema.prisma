@@ -94,8 +94,11 @@ model Insight {
   id         String   @id @default(cuid())
   projectId  String
   name       String
+  // Which query language the definition speaks: "trend" (S05) or "funnel" (S08). Same versioned-definition
+  // pattern — the compiler is chosen by kind + version, so both survive engine swaps.
+  defKind    String   @default("trend")
   defVersion Int      @default(1)
-  definition Json // a TrendSpec (see @pulse/insights)
+  definition Json // a TrendSpec or FunnelSpec (see @pulse/insights)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
