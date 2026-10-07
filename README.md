@@ -42,14 +42,17 @@ path, a separate deployable) · `apps/consumer` (stream workers) · `apps/jobs` 
 (Prisma), shared, config, loadgen, auth, stream, insights, flags}` · Postgres → ClickHouse · Redis Streams.
 
 CI runs **without live infra** — pure cores + in-memory fakes; DB/queue/stream wiring is verified via typecheck
-+ build. The SDK bundle budget is CI-enforced (3.1 KB gz / 6 KB). Perf numbers come from local/lab k6 runs,
-reported in PR bodies.
++ build (`.github/workflows/ci.yml`: lint, then `turbo run typecheck test build`, then `turbo run budget`, then
+the consumer chaos suite `apps/consumer/src/chaos.test.ts`; a parallel job runs gitleaks over history and a
+dependency audit). The SDK bundle budget is a hard 6 KB gzipped limit (`BUDGET_BYTES = 6 * 1024` in
+`packages/sdk/scripts/check-size.mjs`); the last measured size recorded for v1.0.0 was 3.1 KB gz — re-run
+`pnpm turbo run budget` for the current figure. Perf numbers come from local/lab k6 runs, reported in PR bodies.
 
 ## Run it
 ```bash
 pnpm install
 docker compose up --build          # postgres + redis + clickhouse + services
-pnpm dev                           # web + api + ingest + consumer
+pnpm dev                           # turbo run dev: web (vite) + api, ingest, consumer, jobs (tsx watch)
 ```
 See `docs/ops/deploy.md` for staging/prod, `docs/ops/runbooks.md` for on-call, `docs/ops/backups.md` for
 backup/restore.
@@ -57,7 +60,22 @@ backup/restore.
 ## Docs
 - `SPEC.md` — the product spec + curriculum.
 - `docs/sprints/` — the 15 sprint playbooks + the ritual (`00-workflow.md`) + the flaw ledger.
-- `docs/adr/` — architecture decisions (0001–0011). `docs/curriculum/` — per-sprint learning notes.
-- `docs/ops/` — dashboards, alerts, runbooks, backups, postmortems (Sprint 15).
+- `docs/adr/` — architecture decisions (0001–0012; 0012 records staying on Redis Streams and the triggers for
+  Kafka). `docs/curriculum/` — per-sprint learning notes.
+- `docs/ops/` — a pipeline dashboard (`dashboards/pipeline.json`), runbooks, deploy, backups and a postmortem
+  (Sprint 15). Alert rules are code, not docs: `packages/shared/src/alerts.ts` (tested in `alerts.test.ts`).
 - `docs/experiments/` — the peeking simulation + methodology (Sprint 14).
 - `CHANGELOG.md` — the release history, sprint by sprint.
+
+## Where to start reading code
+
+| You want to understand… | Start at |
+| --- | --- |
+| the hot ingestion path | `apps/ingest/` (separate deployable, ADR 0001) |
+| stream consumers, identity, dedup, DLQ | `apps/consumer/src/` (`identity.ts`, `dlq.ts`, `reconcile.ts`, `chaos.test.ts`) |
+| the Postgres -> ClickHouse migration | `apps/consumer/src/migration.ts`, `backfill.ts`, `dual-write.test.ts`; ADR 0007 |
+| the browser SDK and its budget | `packages/sdk/`, `packages/sdk/scripts/check-size.mjs`; ADR 0004 |
+| local infrastructure | `docker-compose.yml` (postgres 16, redis 7, clickhouse 24, plus ingest, consumer, api, jobs, web) |
+
+**Check:** before claiming any number from this README, find the file that enforces or records it — the budget
+in `check-size.mjs`, the CI steps in `ci.yml`, the sprint's measured figures in its PR body or `docs/perf/`.
